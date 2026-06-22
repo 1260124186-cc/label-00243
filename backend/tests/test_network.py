@@ -300,3 +300,65 @@ def test_diff_network_get_regularization_loss_scales_with_difference(diff_networ
 
     assert loss_same.item() == pytest.approx(0.0, abs=1e-6)
     assert loss_diff.item() > 0
+
+
+def test_diff_network_harden_weights(diff_network, sample_batch):
+    output_before = diff_network(sample_batch).clone()
+    diff_network.harden_weights()
+    output_after = diff_network(sample_batch).clone()
+
+    assert not torch.allclose(output_before, output_after, atol=1e-3)
+    assert not torch.isnan(output_after).any()
+
+
+def test_diff_network_quantize_weights(diff_network):
+    diff_network.quantize_weights(num_bits=4)
+
+    for param in diff_network.parameters():
+        unique_values = torch.unique(param)
+        assert len(unique_values) <= 2 ** 4
+
+
+def test_diff_network_quantize_weights_8bit(diff_network):
+    original_params = {k: v.clone() for k, v in diff_network.state_dict().items()}
+    diff_network.quantize_weights(num_bits=8)
+
+    for name, param in diff_network.named_parameters():
+        orig = original_params[name]
+        min_val = orig.min()
+        max_val = orig.max()
+        if max_val > min_val:
+            expected_levels = 2 ** 8
+            normalized = (param - min_val) / (max_val - min_val)
+            quantized = torch.round(normalized * (expected_levels - 1)) / (expected_levels - 1)
+            expected = quantized * (max_val - min_val) + min_val
+            assert torch.allclose(param, expected, atol=1e-6)
+
+
+def test_diff_network_create_from_seeds(state_dim, action_dim):
+    seeds = list(range(1, 25))
+    network = DifferentiableNetwork.create_from_seeds(
+        seeds=seeds,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        initial_temperature=0.5
+    )
+
+    assert isinstance(network, DifferentiableNetwork)
+    assert network.state_dim == state_dim
+    assert network.action_dim == action_dim
+    assert network.temperature == 0.5
+
+    x = torch.randn(2, state_dim)
+    output = network(x)
+    assert output.shape == (2, action_dim)
+    assert not torch.isnan(output).any()
+
+
+def test_diff_network_create_from_seeds_wrong_length(state_dim, action_dim):
+    with pytest.raises(ValueError, match="Expected 24 seeds"):
+        DifferentiableNetwork.create_from_seeds(
+            seeds=list(range(1, 10)),
+            state_dim=state_dim,
+            action_dim=action_dim
+        )

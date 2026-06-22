@@ -18,7 +18,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional, Dict
+from typing import Tuple, Optional, Dict, List
 from loguru import logger
 
 
@@ -344,3 +344,85 @@ class DifferentiableNetwork(nn.Module):
     def export_weight_dict(self) -> Dict[str, torch.Tensor]:
         with torch.no_grad():
             return {name: param.clone() for name, param in self.named_parameters()}
+
+    def harden_weights(self) -> None:
+        """
+        Argmax硬化：将可微注意力层的softmax权重替换为argmax的one-hot版本
+        这使得可微网络在行为上更接近不可微网络，用于创建正则化目标
+        """
+        for layer in [self.layer1, self.layer2]:
+            if hasattr(layer, 'linear_q1') and hasattr(layer, 'linear_k1'):
+                with torch.no_grad():
+                    q1_weight = layer.linear_q1.weight.data
+                    k1_weight = layer.linear_k1.weight.data
+                    attention = q1_weight @ k1_weight.T
+                    idx = attention.argmax(dim=-1)
+                    one_hot = F.one_hot(idx, num_classes=attention.shape[-1]).float()
+                    hardened_q1 = one_hot @ k1_weight
+                    layer.linear_q1.weight.data = hardened_q1
+
+    def quantize_weights(self, num_bits: int = 8) -> None:
+        """
+        权重量化/离散化：将权重离散化为指定比特数的级别
+        用于创建frozen_differentiable模式的正则化目标
+
+        Args:
+            num_bits: 量化比特数，默认为8位
+        """
+        num_levels = 2 ** num_bits
+        with torch.no_grad():
+            for param in self.parameters():
+                min_val = param.min()
+                max_val = param.max()
+                if max_val == min_val:
+                    continue
+                normalized = (param - min_val) / (max_val - min_val)
+                quantized = torch.round(normalized * (num_levels - 1)) / (num_levels - 1)
+                param.data = quantized * (max_val - min_val) + min_val
+
+    @classmethod
+    def create_from_seeds(
+        cls,
+        seeds: List[int],
+        state_dim: int = 8,
+        action_dim: int = 4,
+        initial_temperature: float = 1.0
+    ) -> 'DifferentiableNetwork':
+        """
+        从24个种子生成可微网络
+        使用遗传算法的权重生成机制
+
+        Args:
+            seeds: 24个整数种子列表
+            state_dim: 状态维度
+            action_dim: 动作维度
+            initial_temperature: 初始温度
+
+        Returns:
+            生成的可微网络
+        """
+        if len(seeds) != 24:
+            raise ValueError(f"Expected 24 seeds, got {len(seeds)}")
+
+        from .genetic_algorithm import Individual, WeightGenerator
+
+        individual = Individual.create_from_list(seeds)
+        weight_generator = WeightGenerator()
+
+        network = cls(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            initial_temperature=initial_temperature
+        )
+
+        network_shapes = {
+            name: param.shape
+            for name, param in network.named_parameters()
+        }
+
+        weights = weight_generator.generate_weights_from_individual(
+            individual, network_shapes
+        )
+        weight_generator.apply_weights_to_network(network, weights)
+
+        return network

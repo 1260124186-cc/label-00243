@@ -5,12 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Literal
 from dataclasses import dataclass, field
 import numpy as np
 from loguru import logger
 
 from .network import DifferentiableNetwork, NonDifferentiableNetwork
+
+TargetMode = Literal["random", "frozen_differentiable", "seed_based"]
 
 
 @dataclass
@@ -104,6 +106,11 @@ class PPOAgent:
         temperature_decay: float = 0.995,
         min_temperature: float = 0.01,
         regularization_coef: float = 0.1,
+        target_mode: TargetMode = "random",
+        target_seeds: Optional[List[int]] = None,
+        target_quantize_bits: int = 8,
+        weight_copy_interval: int = 10,
+        harden_on_copy: bool = True,
         device: str = "auto"
     ):
         """
@@ -125,6 +132,11 @@ class PPOAgent:
             temperature_decay: 温度衰减率
             min_temperature: 最小温度
             regularization_coef: 正则化系数
+            target_mode: 目标网络模式：random、frozen_differentiable、seed_based
+            target_seeds: seed_based模式下的24个整数种子
+            target_quantize_bits: frozen_differentiable模式下的量化比特数
+            weight_copy_interval: 周期性copy_weights_from的间隔（更新次数）
+            harden_on_copy: copy_weights_from时是否执行argmax硬化
             device: 计算设备
         """
         self.state_dim = state_dim
@@ -140,6 +152,14 @@ class PPOAgent:
         self.temperature_decay = temperature_decay
         self.min_temperature = min_temperature
         self.regularization_coef = regularization_coef
+        self.target_mode: TargetMode = target_mode
+        self.target_seeds = target_seeds
+        self.target_quantize_bits = target_quantize_bits
+        self.weight_copy_interval = weight_copy_interval
+        self.harden_on_copy = harden_on_copy
+        
+        # 更新计数，用于周期性copy_weights_from
+        self._update_count = 0
         
         # 设备选择
         if device == "auto":
@@ -165,8 +185,11 @@ class PPOAgent:
             {'params': self.value_net.parameters(), 'lr': learning_rate}
         ])
         
-        # 目标网络（不可微版本，用于正则化）
+        # 目标网络（用于正则化）
         self.target_network: Optional[nn.Module] = None
+        
+        # 初始化目标网络
+        self._init_target_network()
         
         # 状态归一化
         self.state_mean = np.zeros(state_dim)
@@ -175,7 +198,8 @@ class PPOAgent:
         
         logger.info(
             f"PPOAgent initialized: state_dim={state_dim}, action_dim={action_dim}, "
-            f"lr={learning_rate}, gamma={gamma}, epsilon={epsilon}"
+            f"lr={learning_rate}, gamma={gamma}, epsilon={epsilon}, "
+            f"target_mode={target_mode}"
         )
         
     def normalize_state(self, state: np.ndarray, update_stats: bool = True) -> np.ndarray:
@@ -368,18 +392,104 @@ class PPOAgent:
             self.temperature_decay,
             self.min_temperature
         )
+
+        # 增加更新计数，周期性更新目标网络
+        self._update_count += 1
+        self._maybe_update_target_network()
         
         return {
             'policy_loss': total_policy_loss / update_count,
             'value_loss': total_value_loss / update_count,
             'entropy': total_entropy / update_count,
             'reg_loss': total_reg_loss / update_count,
-            'temperature': new_temp
+            'temperature': new_temp,
+            'target_updated': self._update_count % self.weight_copy_interval == 0 and self.target_mode == "frozen_differentiable"
         }
     
     def set_target_network(self, target_network: nn.Module) -> None:
         """设置目标网络（不可微版本）用于正则化"""
         self.target_network = target_network.to(self.device)
+        self.target_network.eval()
+        for param in self.target_network.parameters():
+            param.requires_grad = False
+
+    def _init_target_network(self) -> None:
+        """
+        根据target_mode初始化目标网络
+        三种模式：
+        - random: 随机初始化不可微网络（当前行为）
+        - frozen_differentiable: 从当前可微网络复制权重，量化/离散化后作为目标
+        - seed_based: 由24个种子生成不可微网络作为目标
+        """
+        if self.target_mode == "random":
+            target_network = NonDifferentiableNetwork(
+                state_dim=self.state_dim,
+                action_dim=self.action_dim
+            )
+            self.set_target_network(target_network)
+            logger.info("Target network initialized: random non-differentiable network")
+
+        elif self.target_mode == "frozen_differentiable":
+            target_network = DifferentiableNetwork(
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                initial_temperature=self.policy_net.temperature
+            ).to(self.device)
+            target_network.copy_weights_from(self.policy_net)
+            target_network.quantize_weights(self.target_quantize_bits)
+            target_network.harden_weights()
+            self.set_target_network(target_network)
+            logger.info(
+                f"Target network initialized: frozen differentiable network "
+                f"(quantized to {self.target_quantize_bits} bits, hardened)"
+            )
+
+        elif self.target_mode == "seed_based":
+            if self.target_seeds is None:
+                raise ValueError("target_seeds is required for seed_based mode")
+            if len(self.target_seeds) != 24:
+                raise ValueError(f"Expected 24 seeds, got {len(self.target_seeds)}")
+
+            target_network = DifferentiableNetwork.create_from_seeds(
+                seeds=self.target_seeds,
+                state_dim=self.state_dim,
+                action_dim=self.action_dim,
+                initial_temperature=self.policy_net.temperature
+            ).to(self.device)
+            target_network.harden_weights()
+            self.set_target_network(target_network)
+            logger.info(
+                f"Target network initialized: seed-based network from 24 seeds, hardened"
+            )
+
+        else:
+            raise ValueError(f"Unknown target_mode: {self.target_mode}")
+
+    def _maybe_update_target_network(self) -> None:
+        """
+        周期性地更新目标网络（copy_weights_from + argmax硬化）
+        仅在frozen_differentiable模式下执行
+        """
+        if self.target_mode != "frozen_differentiable":
+            return
+
+        if self._update_count % self.weight_copy_interval != 0:
+            return
+
+        if self.target_network is None:
+            return
+
+        logger.info(
+            f"Updating target network (update_count={self._update_count}, "
+            f"interval={self.weight_copy_interval})"
+        )
+
+        with torch.no_grad():
+            self.target_network.copy_weights_from(self.policy_net)
+            self.target_network.quantize_weights(self.target_quantize_bits)
+            if self.harden_on_copy:
+                self.target_network.harden_weights()
+
         self.target_network.eval()
         for param in self.target_network.parameters():
             param.requires_grad = False

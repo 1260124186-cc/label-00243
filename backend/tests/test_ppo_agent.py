@@ -113,11 +113,12 @@ def test_ppo_agent_compute_gae_returns_tensors(ppo_agent, trajectory):
 def test_ppo_agent_update_returns_loss_dict(ppo_agent, trajectory):
     next_value = 0.0
     result = ppo_agent.update(trajectory, next_value)
-    expected_keys = {'policy_loss', 'value_loss', 'entropy', 'reg_loss', 'temperature'}
+    expected_keys = {'policy_loss', 'value_loss', 'entropy', 'reg_loss', 'temperature', 'target_updated'}
     assert set(result.keys()) == expected_keys
     for key in ['policy_loss', 'value_loss', 'entropy', 'reg_loss']:
         assert isinstance(result[key], float)
     assert isinstance(result['temperature'], float)
+    assert isinstance(result['target_updated'], bool)
 
 
 def test_ppo_agent_save_load_roundtrip(ppo_agent, sample_state, tmp_path):
@@ -373,3 +374,139 @@ def test_ppo_agent_evaluate_stochastic_diversity(ppo_agent, sample_state, action
 
         unique_actions = set(actions)
         assert len(unique_actions) >= 1
+
+
+def test_ppo_agent_target_mode_random(state_dim, action_dim):
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        ppo_epochs=1,
+        batch_size=8,
+        device="cpu",
+        target_mode="random"
+    )
+    assert agent.target_mode == "random"
+    assert agent.target_network is not None
+    from src.models.network import NonDifferentiableNetwork
+    assert isinstance(agent.target_network, NonDifferentiableNetwork)
+    for param in agent.target_network.parameters():
+        assert param.requires_grad is False
+
+
+def test_ppo_agent_target_mode_frozen_differentiable(state_dim, action_dim):
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        ppo_epochs=1,
+        batch_size=8,
+        device="cpu",
+        target_mode="frozen_differentiable",
+        target_quantize_bits=4,
+        weight_copy_interval=5,
+        harden_on_copy=True
+    )
+    assert agent.target_mode == "frozen_differentiable"
+    assert agent.target_quantize_bits == 4
+    assert agent.weight_copy_interval == 5
+    assert agent.harden_on_copy is True
+    assert agent.target_network is not None
+    from src.models.network import DifferentiableNetwork
+    assert isinstance(agent.target_network, DifferentiableNetwork)
+    for param in agent.target_network.parameters():
+        assert param.requires_grad is False
+
+
+def test_ppo_agent_target_mode_seed_based(state_dim, action_dim):
+    seeds = list(range(1, 25))
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        ppo_epochs=1,
+        batch_size=8,
+        device="cpu",
+        target_mode="seed_based",
+        target_seeds=seeds
+    )
+    assert agent.target_mode == "seed_based"
+    assert agent.target_seeds == seeds
+    assert agent.target_network is not None
+    from src.models.network import DifferentiableNetwork
+    assert isinstance(agent.target_network, DifferentiableNetwork)
+    for param in agent.target_network.parameters():
+        assert param.requires_grad is False
+
+
+def test_ppo_agent_target_mode_seed_based_no_seeds_raises(state_dim, action_dim):
+    with pytest.raises(ValueError, match="target_seeds is required"):
+        PPOAgent(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            ppo_epochs=1,
+            batch_size=8,
+            device="cpu",
+            target_mode="seed_based",
+            target_seeds=None
+        )
+
+
+def test_ppo_agent_target_mode_seed_based_wrong_seed_count(state_dim, action_dim):
+    with pytest.raises(ValueError, match="Expected 24 seeds"):
+        PPOAgent(
+            state_dim=state_dim,
+            action_dim=action_dim,
+            ppo_epochs=1,
+            batch_size=8,
+            device="cpu",
+            target_mode="seed_based",
+            target_seeds=list(range(1, 10))
+        )
+
+
+def test_ppo_agent_periodic_target_update(state_dim, action_dim, trajectory):
+    agent = PPOAgent(
+        state_dim=state_dim,
+        action_dim=action_dim,
+        ppo_epochs=1,
+        batch_size=8,
+        device="cpu",
+        target_mode="frozen_differentiable",
+        weight_copy_interval=2,
+        harden_on_copy=True
+    )
+
+    assert agent._update_count == 0
+
+    result1 = agent.update(trajectory, 0.0)
+    assert result1['target_updated'] is False
+    assert agent._update_count == 1
+
+    result2 = agent.update(trajectory, 0.0)
+    assert result2['target_updated'] is True
+    assert agent._update_count == 2
+
+    result3 = agent.update(trajectory, 0.0)
+    assert result3['target_updated'] is False
+    assert agent._update_count == 3
+
+    result4 = agent.update(trajectory, 0.0)
+    assert result4['target_updated'] is True
+    assert agent._update_count == 4
+
+
+def test_ppo_agent_regularization_loss_with_target(ppo_agent, trajectory):
+    from src.models.network import NonDifferentiableNetwork
+    target = NonDifferentiableNetwork(
+        state_dim=ppo_agent.state_dim,
+        action_dim=ppo_agent.action_dim
+    )
+    ppo_agent.set_target_network(target)
+
+    result = ppo_agent.update(trajectory, 0.0)
+    assert result['reg_loss'] >= 0.0
+    assert 'reg_loss' in result
+
+
+def test_ppo_agent_update_count_increments(ppo_agent, trajectory):
+    initial_count = ppo_agent._update_count
+    ppo_agent.update(trajectory, 0.0)
+    assert ppo_agent._update_count == initial_count + 1

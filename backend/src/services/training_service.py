@@ -12,7 +12,6 @@ import numpy as np
 from loguru import logger
 
 from ..models.ppo_agent import PPOAgent, TrainingResult
-from ..models.network import NonDifferentiableNetwork
 from ..schemas.requests import TrainingStartRequest
 from ..schemas.responses import TrainingStatusData, TrainingResultData, TrainingHistoryItem
 from ..core.exceptions import TrainingException
@@ -95,7 +94,7 @@ class TrainingService:
             state_dim = env.observation_space.shape[0]
             action_dim = env.action_space.n
             
-            # 创建PPO智能体
+            # 创建PPO智能体（包含target_mode配置）
             agent = PPOAgent(
                 state_dim=state_dim,
                 action_dim=action_dim,
@@ -105,17 +104,15 @@ class TrainingService:
                 initial_temperature=task.config.initial_temperature,
                 temperature_decay=task.config.temperature_decay,
                 min_temperature=task.config.min_temperature,
-                regularization_coef=task.config.regularization_coef
+                regularization_coef=task.config.regularization_coef,
+                target_mode=task.config.target_mode,
+                target_seeds=task.config.target_seeds,
+                target_quantize_bits=task.config.target_quantize_bits,
+                weight_copy_interval=task.config.weight_copy_interval,
+                harden_on_copy=task.config.harden_on_copy
             )
             
             task.agent = agent
-            
-            # 创建目标网络（不可微版本）用于正则化
-            target_network = NonDifferentiableNetwork(
-                state_dim=state_dim,
-                action_dim=action_dim
-            )
-            agent.set_target_network(target_network)
             
             # 定义回调函数更新任务状态
             def training_callback(episode: int, result: TrainingResult):

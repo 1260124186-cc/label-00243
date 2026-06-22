@@ -1,7 +1,7 @@
 """
 API请求模型
 """
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -17,6 +17,39 @@ class TrainingStartRequest(BaseModel):
     min_temperature: float = Field(default=0.01, gt=0, description="最小温度")
     regularization_coef: float = Field(default=0.1, ge=0, description="正则化系数")
     env_name: str = Field(default="LunarLander-v2", description="环境名称")
+    target_mode: Literal["random", "frozen_differentiable", "seed_based"] = Field(
+        default="random",
+        description="目标网络模式：random（随机不可微网络）、frozen_differentiable（可微网络量化后作为目标）、seed_based（由24种子生成不可微网络）"
+    )
+    target_seeds: Optional[List[int]] = Field(
+        default=None,
+        description="seed_based模式下的24个整数种子"
+    )
+    target_quantize_bits: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="frozen_differentiable模式下的量化比特数"
+    )
+    weight_copy_interval: int = Field(
+        default=10,
+        ge=1,
+        description="周期性copy_weights_from的间隔（更新次数）"
+    )
+    harden_on_copy: bool = Field(
+        default=True,
+        description="copy_weights_from时是否执行argmax硬化"
+    )
+
+    @field_validator('target_seeds')
+    @classmethod
+    def validate_target_seeds(cls, v, info):
+        if v is not None:
+            if len(v) != 24:
+                raise ValueError('target_seeds must contain exactly 24 integers')
+        if info.data.get('target_mode') == 'seed_based' and v is None:
+            raise ValueError('target_seeds is required when target_mode is seed_based')
+        return v
 
 
 class GeneticStartRequest(BaseModel):
