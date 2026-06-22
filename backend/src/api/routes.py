@@ -12,7 +12,8 @@ from ..schemas.requests import (
     ComparisonRequest,
     ConfigUpdateRequest,
     PageRequest,
-    VisualizationRequest
+    VisualizationRequest,
+    PipelineStartRequest
 )
 from ..schemas.responses import (
     BaseResponse,
@@ -30,12 +31,16 @@ from ..schemas.responses import (
     ConfigData,
     VisualizationData,
     TrainingDashboardData,
-    GeneticProgressData
+    GeneticProgressData,
+    PipelineStatusData,
+    PipelineStageData,
+    ComparisonReportData
 )
 from ..services.training_service import TrainingService
 from ..services.genetic_service import GeneticService
 from ..services.evaluation_service import EvaluationService
 from ..services.visualization_service import VisualizationService
+from ..services.pipeline_service import PipelineService
 from ..core.exceptions import BaseAppException
 
 # 创建路由器
@@ -46,6 +51,7 @@ _training_service: Optional[TrainingService] = None
 _genetic_service: Optional[GeneticService] = None
 _evaluation_service: Optional[EvaluationService] = None
 _visualization_service: Optional[VisualizationService] = None
+_pipeline_service: Optional[PipelineService] = None
 
 
 def get_training_service() -> TrainingService:
@@ -74,6 +80,13 @@ def get_visualization_service() -> VisualizationService:
     if _visualization_service is None:
         _visualization_service = VisualizationService()
     return _visualization_service
+
+
+def get_pipeline_service() -> PipelineService:
+    global _pipeline_service
+    if _pipeline_service is None:
+        _pipeline_service = PipelineService()
+    return _pipeline_service
 
 
 # ==================== 训练管理接口 ====================
@@ -465,6 +478,84 @@ async def generate_fitness_curve(
     return BaseResponse.success(data=result)
 
 
+# ==================== 流水线接口 ====================
+
+pipeline_router = APIRouter(prefix="/pipeline", tags=["Pipeline"])
+
+
+@pipeline_router.post(
+    "/start",
+    response_model=BaseResponse[str],
+    summary="启动流水线",
+    description="启动PPO+GA流水线：PPO训练→权重导出→GA搜索→对比报告"
+)
+async def start_pipeline(
+    request: PipelineStartRequest,
+    service: PipelineService = Depends(get_pipeline_service)
+):
+    logger.info(f"Starting pipeline with config: {request.model_dump()}")
+    task_id = service.start_pipeline(request)
+    return BaseResponse.success(data=task_id, message="Pipeline started")
+
+
+@pipeline_router.get(
+    "/status/{task_id}",
+    response_model=BaseResponse[PipelineStatusData],
+    summary="获取流水线状态",
+    description="获取流水线任务的当前状态，包含各阶段进度"
+)
+async def get_pipeline_status(
+    task_id: str,
+    service: PipelineService = Depends(get_pipeline_service)
+):
+    status = service.get_status(task_id)
+    return BaseResponse.success(data=status)
+
+
+@pipeline_router.get(
+    "/report/{task_id}",
+    response_model=BaseResponse[ComparisonReportData],
+    summary="获取对比报告",
+    description="获取流水线完成后的对比报告"
+)
+async def get_pipeline_report(
+    task_id: str,
+    service: PipelineService = Depends(get_pipeline_service)
+):
+    report = service.get_report(task_id)
+    return BaseResponse.success(data=report)
+
+
+@pipeline_router.post(
+    "/stop/{task_id}",
+    response_model=BaseResponse[bool],
+    summary="停止流水线",
+    description="停止指定的流水线任务"
+)
+async def stop_pipeline(
+    task_id: str,
+    service: PipelineService = Depends(get_pipeline_service)
+):
+    logger.info(f"Stopping pipeline task: {task_id}")
+    success = service.stop_pipeline(task_id)
+    if success:
+        return BaseResponse.success(data=True, message="Pipeline task stopped")
+    return BaseResponse.error(code=400, message="Task is not running", data=False)
+
+
+@pipeline_router.get(
+    "/tasks",
+    response_model=BaseResponse[List[PipelineStatusData]],
+    summary="列出所有流水线任务",
+    description="获取所有流水线任务的状态列表"
+)
+async def list_pipeline_tasks(
+    service: PipelineService = Depends(get_pipeline_service)
+):
+    tasks = service.list_tasks()
+    return BaseResponse.success(data=tasks)
+
+
 # ==================== 系统管理接口 ====================
 
 system_router = APIRouter(prefix="", tags=["System"])
@@ -540,4 +631,5 @@ router.include_router(training_router)
 router.include_router(genetic_router)
 router.include_router(evaluation_router)
 router.include_router(visualization_router)
+router.include_router(pipeline_router)
 router.include_router(system_router)

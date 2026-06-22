@@ -55,6 +55,11 @@ class ResourceNotFoundException(BaseAppException):
         super().__init__(message, code=4004, details={"resource": resource, "identifier": identifier})
 
 
+class PipelineException(BaseAppException):
+    def __init__(self, message: str, details: Optional[Any] = None):
+        super().__init__(message, code=5005, details=details)
+
+
 class ConfigurationException(BaseAppException):
     """配置相关异常"""
     

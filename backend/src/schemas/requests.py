@@ -90,6 +90,28 @@ class PageRequest(BaseModel):
     page_size: int = Field(default=20, ge=1, le=100, description="每页大小")
 
 
+class PipelineStartRequest(BaseModel):
+    ppo_config: TrainingStartRequest = Field(description="PPO训练配置")
+    ga_config: GeneticStartRequest = Field(description="GA搜索配置")
+    target_seeds: Optional[List[int]] = Field(
+        default=None,
+        description="可选目标种子（24个整数），用于GA种群初始化引导"
+    )
+    weight_similarity_coef: float = Field(
+        default=0.1,
+        ge=0,
+        le=1,
+        description="权重相似度在GA适应度中的系数"
+    )
+
+    @field_validator('target_seeds')
+    @classmethod
+    def validate_target_seeds(cls, v):
+        if v is not None and len(v) != 24:
+            raise ValueError('target_seeds must contain exactly 24 integers (4 rows x 6 columns)')
+        return v
+
+
 class VisualizationRequest(BaseModel):
     """可视化请求"""
     task_id: str = Field(description="任务ID")

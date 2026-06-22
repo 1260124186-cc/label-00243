@@ -18,7 +18,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 from loguru import logger
 
 
@@ -336,3 +336,11 @@ class DifferentiableNetwork(nn.Module):
             loss += F.mse_loss(param1, param2.detach())
             
         return loss
+
+    def export_weight_vector(self) -> torch.Tensor:
+        with torch.no_grad():
+            return torch.cat([p.flatten() for p in self.parameters()])
+
+    def export_weight_dict(self) -> Dict[str, torch.Tensor]:
+        with torch.no_grad():
+            return {name: param.clone() for name, param in self.named_parameters()}

@@ -206,3 +206,33 @@ class ConfigData(BaseModel):
     ppo: Dict[str, Any]
     genetic: Dict[str, Any]
     environment: Dict[str, Any]
+
+
+class PipelineStageData(BaseModel):
+    stage_name: str = Field(description="阶段名称: ppo_training, weight_export, ga_search, comparison_report")
+    status: str = Field(description="阶段状态: pending, running, completed, failed, skipped")
+    started_at: Optional[datetime] = Field(default=None, description="开始时间")
+    completed_at: Optional[datetime] = Field(default=None, description="完成时间")
+    details: Optional[Dict[str, Any]] = Field(default=None, description="阶段详情")
+
+
+class PipelineStatusData(BaseModel):
+    task_id: str = Field(description="流水线任务ID")
+    status: str = Field(description="整体状态: pending, running, completed, failed, stopped")
+    current_stage: str = Field(description="当前阶段")
+    stages: List[PipelineStageData] = Field(description="各阶段状态")
+    started_at: Optional[datetime] = Field(default=None, description="开始时间")
+    completed_at: Optional[datetime] = Field(default=None, description="完成时间")
+    progress: float = Field(default=0.0, description="总进度百分比")
+
+
+class ComparisonReportData(BaseModel):
+    ppo_best_reward: float = Field(description="PPO训练最佳奖励")
+    ppo_avg_reward: float = Field(description="PPO训练平均奖励")
+    ga_best_fitness: float = Field(description="GA搜索最佳适应度")
+    ga_best_seeds: Optional[List[List[int]]] = Field(default=None, description="GA最佳个体种子")
+    weight_distance: float = Field(description="GA最佳权重与目标权重的L2距离")
+    performance_gap: float = Field(description="PPO与GA性能差距")
+    target_weight_norm: float = Field(description="目标权重向量范数")
+    ga_weight_norm: float = Field(description="GA生成权重向量范数")
+    similarity_score: float = Field(description="权重相似度分数(0-1)")
