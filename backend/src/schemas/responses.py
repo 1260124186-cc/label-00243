@@ -65,6 +65,8 @@ class TrainingStatusData(BaseModel):
     started_at: Optional[datetime] = Field(default=None, description="开始时间")
     completed_at: Optional[datetime] = Field(default=None, description="完成时间")
     progress: float = Field(default=0.0, description="进度百分比")
+    auto_start_ga: bool = Field(default=False, description="是否自动启动关联GA任务")
+    child_ga_task_id: Optional[str] = Field(default=None, description="自动启动的GA子任务ID")
     
     @field_serializer('best_reward')
     def serialize_best_reward(self, value: float) -> Optional[float]:
@@ -119,6 +121,7 @@ class GeneticStatusData(BaseModel):
     elite_archive_size: int = Field(default=0, description="精英档案大小")
     best_individual: Optional[IndividualData] = Field(default=None, description="最佳个体")
     progress: float = Field(default=0.0, description="进度百分比")
+    parent_task_id: Optional[str] = Field(default=None, description="父任务ID（PPO训练任务ID）")
     
     @field_serializer('best_fitness')
     def serialize_best_fitness(self, value: float) -> Optional[float]:

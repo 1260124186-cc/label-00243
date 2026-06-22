@@ -2,7 +2,7 @@
 API请求模型
 """
 from typing import Optional, List, Dict, Any, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TrainingStartRequest(BaseModel):
@@ -40,6 +40,14 @@ class TrainingStartRequest(BaseModel):
         default=True,
         description="copy_weights_from时是否执行argmax硬化"
     )
+    auto_start_ga: bool = Field(
+        default=False,
+        description="训练完成且avg_reward_last_100 >= 200时，是否自动启动关联的GA任务"
+    )
+    ga_config: Optional["GeneticStartRequest"] = Field(
+        default=None,
+        description="自动启动GA任务时使用的配置，auto_start_ga为true时必填"
+    )
 
     @field_validator('target_seeds')
     @classmethod
@@ -50,6 +58,12 @@ class TrainingStartRequest(BaseModel):
         if info.data.get('target_mode') == 'seed_based' and v is None:
             raise ValueError('target_seeds is required when target_mode is seed_based')
         return v
+
+    @model_validator(mode='after')
+    def validate_auto_start_ga_config(self):
+        if self.auto_start_ga and self.ga_config is None:
+            raise ValueError('ga_config is required when auto_start_ga is true')
+        return self
 
 
 class GeneticStartRequest(BaseModel):
@@ -67,6 +81,10 @@ class GeneticStartRequest(BaseModel):
     alpha: float = Field(default=0.9, ge=0, le=1, description="双目标适应度权重：alpha * env_reward + (1-alpha) * weight_similarity")
     target_weights_path: Optional[str] = Field(default=None, description="PPO训练好的权重文件路径，用于计算权重相似度")
     target_seeds: Optional[List[int]] = Field(default=None, description="目标网络的24个种子，用于生成目标权重计算相似度")
+    parent_task_id: Optional[str] = Field(
+        default=None,
+        description="父任务ID（通常是PPO训练任务ID），用于关联任务流水线"
+    )
 
     @field_validator('seed_range_max')
     @classmethod

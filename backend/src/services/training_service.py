@@ -34,6 +34,8 @@ class TrainingTask:
         self.result: Optional[TrainingResult] = None
         self.agent: Optional[PPOAgent] = None
         self._stop_flag = threading.Event()
+        self.auto_start_ga = config.auto_start_ga
+        self.child_ga_task_id: Optional[str] = None
         
     def should_stop(self) -> bool:
         return self._stop_flag.is_set()
@@ -57,8 +59,13 @@ class TrainingService:
         self.tasks: Dict[str, TrainingTask] = {}
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
         self._lock = threading.Lock()
+        self._genetic_service = None
         logger.info(f"TrainingService initialized with max_concurrent_tasks={max_concurrent_tasks}")
-        
+    
+    def set_genetic_service(self, genetic_service) -> None:
+        """设置遗传算法服务引用，用于自动启动关联GA任务"""
+        self._genetic_service = genetic_service
+    
     def start_training(self, request: TrainingStartRequest) -> str:
         """
         启动训练任务
@@ -80,6 +87,78 @@ class TrainingService:
         
         logger.info(f"Training task {task_id} started with config: {request.model_dump()}")
         return task_id
+    
+    def _maybe_auto_start_ga(self, task: TrainingTask, model_path: str) -> None:
+        """
+        检查是否需要自动启动关联的GA任务
+        条件：
+        1. auto_start_ga 为 true
+        2. 训练状态为 completed
+        3. avg_reward_last_100 >= 200
+        4. 已设置 genetic_service 引用
+        5. 配置中包含 ga_config
+        
+        Args:
+            task: 训练任务
+            model_path: 保存的模型路径
+        """
+        if not task.auto_start_ga:
+            return
+        
+        if task.status != "completed":
+            return
+        
+        if task.avg_reward_last_100 < 200:
+            return
+        
+        if self._genetic_service is None:
+            logger.warning(
+                f"Cannot auto-start GA for task {task.task_id}: "
+                f"genetic_service not set"
+            )
+            return
+        
+        if task.config.ga_config is None:
+            logger.warning(
+                f"Cannot auto-start GA for task {task.task_id}: "
+                f"ga_config not provided"
+            )
+            return
+        
+        try:
+            # 基于用户提供的GA配置创建新的请求，并设置父任务ID和目标权重路径
+            from ..schemas.requests import GeneticStartRequest
+            
+            ga_config = task.config.ga_config
+            ga_request = GeneticStartRequest(
+                population_size=ga_config.population_size,
+                max_generations=ga_config.max_generations,
+                mutation_rate=ga_config.mutation_rate,
+                crossover_rate=ga_config.crossover_rate,
+                elite_size=ga_config.elite_size,
+                seed_range_min=ga_config.seed_range_min,
+                seed_range_max=ga_config.seed_range_max,
+                target_fitness=ga_config.target_fitness,
+                evaluation_episodes=ga_config.evaluation_episodes,
+                env_name=ga_config.env_name,
+                alpha=ga_config.alpha,
+                target_weights_path=model_path,
+                target_seeds=ga_config.target_seeds,
+                parent_task_id=task.task_id,
+            )
+            
+            ga_task_id = self._genetic_service.start_search(ga_request)
+            task.child_ga_task_id = ga_task_id
+            
+            logger.info(
+                f"Auto-started GA task {ga_task_id} for PPO task {task.task_id} "
+                f"(avg_reward_last_100={task.avg_reward_last_100:.2f})"
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"Failed to auto-start GA task for PPO task {task.task_id}: {str(e)}"
+            )
     
     def _run_training(self, task: TrainingTask) -> None:
         """
@@ -151,6 +230,9 @@ class TrainingService:
                 f"Avg last 100: {task.avg_reward_last_100:.2f}"
             )
             
+            # 检查是否需要自动启动GA任务
+            self._maybe_auto_start_ga(task, model_path)
+            
         except InterruptedError:
             task.status = "stopped"
             task.completed_at = datetime.now()
@@ -190,7 +272,9 @@ class TrainingService:
             current_temperature=task.current_temperature,
             started_at=task.started_at,
             completed_at=task.completed_at,
-            progress=task.get_progress()
+            progress=task.get_progress(),
+            auto_start_ga=task.auto_start_ga,
+            child_ga_task_id=task.child_ga_task_id
         )
     
     def stop_training(self, task_id: str) -> bool:
@@ -311,7 +395,9 @@ class TrainingService:
                 current_temperature=t.current_temperature,
                 started_at=t.started_at,
                 completed_at=t.completed_at,
-                progress=t.get_progress()
+                progress=t.get_progress(),
+                auto_start_ga=t.auto_start_ga,
+                child_ga_task_id=t.child_ga_task_id
             )
             for t in tasks
         ]

@@ -141,6 +141,7 @@ class GeneticTask:
         self.completed_at: Optional[datetime] = None
         self.ga: Optional[GeneticAlgorithm] = None
         self._stop_flag = threading.Event()
+        self.parent_task_id: Optional[str] = config.parent_task_id
 
     def should_stop(self) -> bool:
         return self._stop_flag.is_set()
@@ -402,7 +403,8 @@ class GeneticService:
             population_size=task.population_size,
             elite_archive_size=task.elite_archive_size,
             best_individual=best_ind_data,
-            progress=task.get_progress()
+            progress=task.get_progress(),
+            parent_task_id=task.parent_task_id
         )
 
     def stop_search(self, task_id: str) -> bool:
@@ -491,7 +493,8 @@ class GeneticService:
                 population_size=task.population_size,
                 elite_archive_size=task.elite_archive_size,
                 best_individual=best_ind_data,
-                progress=task.get_progress()
+                progress=task.get_progress(),
+                parent_task_id=task.parent_task_id
             ))
 
         return result

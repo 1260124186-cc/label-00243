@@ -694,3 +694,252 @@ def test_training_service_stop_training_not_found_raises():
     service = TrainingService(max_concurrent_tasks=1)
     with pytest.raises(TrainingException):
         service.stop_training("nonexistent")
+
+
+def test_training_task_auto_start_ga_default():
+    config = TrainingStartRequest(total_episodes=100)
+    task = TrainingTask("task-auto-1", config)
+    assert task.auto_start_ga is False
+    assert task.child_ga_task_id is None
+
+
+def test_training_task_auto_start_ga_enabled():
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=50, population_size=20)
+    config = TrainingStartRequest(
+        total_episodes=100,
+        auto_start_ga=True,
+        ga_config=ga_config
+    )
+    task = TrainingTask("task-auto-2", config)
+    assert task.auto_start_ga is True
+    assert task.child_ga_task_id is None
+    assert task.config.ga_config is not None
+    assert task.config.ga_config.max_generations == 50
+
+
+def test_training_start_request_auto_start_ga_requires_ga_config():
+    from src.schemas.requests import GeneticStartRequest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="ga_config is required"):
+        TrainingStartRequest(total_episodes=100, auto_start_ga=True)
+
+    ga_config = GeneticStartRequest(max_generations=10)
+    req = TrainingStartRequest(total_episodes=100, auto_start_ga=True, ga_config=ga_config)
+    assert req.auto_start_ga is True
+    assert req.ga_config is not None
+
+
+def test_genetic_task_parent_task_id_default():
+    config = GeneticStartRequest(max_generations=100)
+    task = GeneticTask("ga-parent-1", config)
+    assert task.parent_task_id is None
+
+
+def test_genetic_task_parent_task_id_set():
+    config = GeneticStartRequest(max_generations=100, parent_task_id="ppo-task-123")
+    task = GeneticTask("ga-parent-2", config)
+    assert task.parent_task_id == "ppo-task-123"
+
+
+def test_training_service_set_genetic_service():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    assert training_service._genetic_service is None
+    training_service.set_genetic_service(genetic_service)
+    assert training_service._genetic_service is genetic_service
+
+
+def test_training_service_get_status_includes_auto_start_ga():
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=50)
+    service = TrainingService(max_concurrent_tasks=1)
+    config = TrainingStartRequest(total_episodes=500, auto_start_ga=True, ga_config=ga_config)
+    task = TrainingTask("test-status-auto", config)
+    task.status = "running"
+    task.current_episode = 100
+    task.avg_reward_last_100 = 150.0
+
+    with service._lock:
+        service.tasks["test-status-auto"] = task
+
+    status = service.get_status("test-status-auto")
+    assert status.auto_start_ga is True
+    assert status.child_ga_task_id is None
+
+
+def test_training_service_get_status_includes_child_ga_task_id():
+    service = TrainingService(max_concurrent_tasks=1)
+    config = TrainingStartRequest(total_episodes=500)
+    task = TrainingTask("test-status-child", config)
+    task.status = "completed"
+    task.child_ga_task_id = "ga-child-123"
+
+    with service._lock:
+        service.tasks["test-status-child"] = task
+
+    status = service.get_status("test-status-child")
+    assert status.child_ga_task_id == "ga-child-123"
+
+
+def test_genetic_service_get_status_includes_parent_task_id():
+    service = GeneticService(max_concurrent_tasks=1)
+    config = GeneticStartRequest(max_generations=100, parent_task_id="ppo-parent-456")
+    task = GeneticTask("test-ga-parent", config)
+    task.status = "running"
+    task.current_generation = 10
+
+    with service._lock:
+        service.tasks["test-ga-parent"] = task
+
+    status = service.get_status("test-ga-parent")
+    assert status.parent_task_id == "ppo-parent-456"
+
+
+def test_training_service_list_tasks_includes_auto_fields():
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=50)
+    service = TrainingService(max_concurrent_tasks=2)
+    config1 = TrainingStartRequest(total_episodes=100, auto_start_ga=True, ga_config=ga_config)
+    config2 = TrainingStartRequest(total_episodes=200, auto_start_ga=False)
+    task1 = TrainingTask("list-auto-1", config1)
+    task2 = TrainingTask("list-auto-2", config2)
+    task2.child_ga_task_id = "ga-child-xyz"
+
+    with service._lock:
+        service.tasks["list-auto-1"] = task1
+        service.tasks["list-auto-2"] = task2
+
+    tasks = service.list_tasks()
+    assert len(tasks) == 2
+
+    task_map = {t.task_id: t for t in tasks}
+    assert task_map["list-auto-1"].auto_start_ga is True
+    assert task_map["list-auto-1"].child_ga_task_id is None
+    assert task_map["list-auto-2"].auto_start_ga is False
+    assert task_map["list-auto-2"].child_ga_task_id == "ga-child-xyz"
+
+
+def test_genetic_service_list_tasks_includes_parent_task_id():
+    service = GeneticService(max_concurrent_tasks=2)
+    config1 = GeneticStartRequest(max_generations=50, parent_task_id="ppo-1")
+    config2 = GeneticStartRequest(max_generations=50)
+    task1 = GeneticTask("list-ga-1", config1)
+    task2 = GeneticTask("list-ga-2", config2)
+
+    with service._lock:
+        service.tasks["list-ga-1"] = task1
+        service.tasks["list-ga-2"] = task2
+
+    tasks = service.list_tasks()
+    assert len(tasks) == 2
+
+    task_map = {t.task_id: t for t in tasks}
+    assert task_map["list-ga-1"].parent_task_id == "ppo-1"
+    assert task_map["list-ga-2"].parent_task_id is None
+
+
+def test_maybe_auto_start_ga_no_auto_start_flag():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    training_service.set_genetic_service(genetic_service)
+
+    config = TrainingStartRequest(total_episodes=100, auto_start_ga=False)
+    task = TrainingTask("test-no-auto", config)
+    task.status = "completed"
+    task.avg_reward_last_100 = 250.0
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is None
+
+
+def test_maybe_auto_start_ga_not_completed():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    training_service.set_genetic_service(genetic_service)
+
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=10)
+    config = TrainingStartRequest(total_episodes=100, auto_start_ga=True, ga_config=ga_config)
+    task = TrainingTask("test-not-completed", config)
+    task.status = "running"
+    task.avg_reward_last_100 = 250.0
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is None
+
+
+def test_maybe_auto_start_ga_reward_below_threshold():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    training_service.set_genetic_service(genetic_service)
+
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=10)
+    config = TrainingStartRequest(total_episodes=100, auto_start_ga=True, ga_config=ga_config)
+    task = TrainingTask("test-low-reward", config)
+    task.status = "completed"
+    task.avg_reward_last_100 = 150.0
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is None
+
+
+def test_maybe_auto_start_ga_no_genetic_service():
+    training_service = TrainingService(max_concurrent_tasks=1)
+
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(max_generations=10)
+    config = TrainingStartRequest(total_episodes=100, auto_start_ga=True, ga_config=ga_config)
+    task = TrainingTask("test-no-ga-service", config)
+    task.status = "completed"
+    task.avg_reward_last_100 = 250.0
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is None
+
+
+def test_maybe_auto_start_ga_no_ga_config():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    training_service.set_genetic_service(genetic_service)
+
+    config = TrainingStartRequest(total_episodes=100, auto_start_ga=False)
+    task = TrainingTask("test-no-ga-config", config)
+    task.status = "completed"
+    task.avg_reward_last_100 = 250.0
+    task.auto_start_ga = True
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is None
+
+
+def test_maybe_auto_start_ga_success():
+    training_service = TrainingService(max_concurrent_tasks=1)
+    genetic_service = GeneticService(max_concurrent_tasks=1)
+    training_service.set_genetic_service(genetic_service)
+
+    from src.schemas.requests import GeneticStartRequest
+    ga_config = GeneticStartRequest(
+        max_generations=5,
+        population_size=10,
+        env_name="CartPole-v1"
+    )
+    config = TrainingStartRequest(
+        total_episodes=100,
+        auto_start_ga=True,
+        ga_config=ga_config,
+        env_name="CartPole-v1"
+    )
+    task = TrainingTask("test-auto-success", config)
+    task.status = "completed"
+    task.avg_reward_last_100 = 250.0
+
+    training_service._maybe_auto_start_ga(task, "/tmp/fake_model.pt")
+    assert task.child_ga_task_id is not None
+    assert task.child_ga_task_id in genetic_service.tasks
+
+    ga_task = genetic_service.tasks[task.child_ga_task_id]
+    assert ga_task.parent_task_id == "test-auto-success"
+    assert ga_task.config.target_weights_path == "/tmp/fake_model.pt"

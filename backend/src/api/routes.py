@@ -58,6 +58,9 @@ def get_training_service() -> TrainingService:
     global _training_service
     if _training_service is None:
         _training_service = TrainingService()
+        # 关联遗传算法服务，用于自动启动GA任务
+        genetic_service = get_genetic_service()
+        _training_service.set_genetic_service(genetic_service)
     return _training_service
 
 
