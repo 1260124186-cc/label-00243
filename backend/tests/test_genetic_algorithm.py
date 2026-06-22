@@ -63,12 +63,14 @@ class TestWeightGenerator:
     def test_lcg_random_deterministic(self, weight_generator):
         result1 = weight_generator.lcg_random(seed=42, a=3, b=5, count=10)
         result2 = weight_generator.lcg_random(seed=42, a=3, b=5, count=10)
-        assert result1 == result2
+        np.testing.assert_array_equal(result1, result2)
         assert len(result1) == 10
+        assert isinstance(result1, np.ndarray)
 
     def test_lcg_random_zero_params_returns_zeros(self, weight_generator):
         result = weight_generator.lcg_random(seed=42, a=0, b=0, count=5)
-        assert result == [0, 0, 0, 0, 0]
+        expected = np.zeros(5, dtype=np.int64)
+        np.testing.assert_array_equal(result, expected)
 
     def test_normalize_weights(self, weight_generator):
         weights = np.array([3.0, -6.0, 2.0])
@@ -404,12 +406,12 @@ class TestWeightGeneratorExtended:
     def test_lcg_random_with_different_seeds(self, weight_generator):
         result1 = weight_generator.lcg_random(seed=1, a=3, b=5, count=5)
         result2 = weight_generator.lcg_random(seed=2, a=3, b=5, count=5)
-        assert result1 != result2
+        assert not np.array_equal(result1, result2)
 
     def test_lcg_random_modulus_range(self, weight_generator):
         results = weight_generator.lcg_random(seed=42, a=7, b=13, count=100)
-        for r in results:
-            assert 0 <= r < weight_generator.modulus
+        assert isinstance(results, np.ndarray)
+        assert (results >= 0).all() and (results < weight_generator.modulus).all()
 
     def test_generate_layer_weights_normalized(self, weight_generator):
         weights = weight_generator.generate_layer_weights(seed=42, a=3, b=5, shape=(5, 5))
