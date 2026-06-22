@@ -20,9 +20,10 @@ from ..core.exceptions import TrainingException
 class TrainingTask:
     """训练任务"""
     
-    def __init__(self, task_id: str, config: TrainingStartRequest):
+    def __init__(self, task_id: str, config: TrainingStartRequest, config_snapshot: Optional[Any] = None):
         self.task_id = task_id
         self.config = config
+        self.config_snapshot = config_snapshot
         self.status = "pending"
         self.current_episode = 0
         self.total_episodes = config.total_episodes
@@ -55,7 +56,12 @@ class TrainingService:
     管理PPO训练任务的生命周期
     """
     
-    def __init__(self, max_concurrent_tasks: int = 2):
+    def __init__(self, max_concurrent_tasks: Optional[int] = None):
+        from ..config import settings
+        if max_concurrent_tasks is None:
+            max_concurrent_tasks = settings.MAX_CONCURRENT_TRAINING_TASKS
+        
+        self.max_concurrent_tasks = max_concurrent_tasks
         self.tasks: Dict[str, TrainingTask] = {}
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
         self._lock = threading.Lock()
@@ -65,6 +71,26 @@ class TrainingService:
     def set_genetic_service(self, genetic_service) -> None:
         """设置遗传算法服务引用，用于自动启动关联GA任务"""
         self._genetic_service = genetic_service
+    
+    def update_max_concurrent_tasks(self, new_max: int) -> None:
+        """
+        更新并发任务上限
+        
+        Args:
+            new_max: 新的并发上限
+        """
+        with self._lock:
+            old_max = self.max_concurrent_tasks
+            self.max_concurrent_tasks = new_max
+            
+            old_executor = self.executor
+            self.executor = ThreadPoolExecutor(max_workers=new_max)
+            
+            old_executor.shutdown(wait=False, cancel_futures=False)
+            
+            logger.info(
+                f"TrainingService max_concurrent_tasks updated: {old_max} -> {new_max}"
+            )
     
     def start_training(self, request: TrainingStartRequest) -> str:
         """
@@ -76,8 +102,11 @@ class TrainingService:
         Returns:
             任务ID
         """
+        from ..config import create_config_snapshot
+        
         task_id = str(uuid.uuid4())
-        task = TrainingTask(task_id, request)
+        config_snapshot = create_config_snapshot()
+        task = TrainingTask(task_id, request, config_snapshot)
         
         with self._lock:
             self.tasks[task_id] = task
@@ -85,7 +114,10 @@ class TrainingService:
         # 提交到线程池执行
         self.executor.submit(self._run_training, task)
         
-        logger.info(f"Training task {task_id} started with config: {request.model_dump()}")
+        logger.info(
+            f"Training task {task_id} started with config: {request.model_dump()}, "
+            f"snapshot_time: {config_snapshot.snapshot_time}"
+        )
         return task_id
     
     def _maybe_auto_start_ga(self, task: TrainingTask, model_path: str) -> None:

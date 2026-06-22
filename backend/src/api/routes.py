@@ -29,6 +29,7 @@ from ..schemas.responses import (
     ComparisonResultData,
     HealthData,
     ConfigData,
+    ConfigDiffData,
     VisualizationData,
     TrainingDashboardData,
     GeneticProgressData,
@@ -610,23 +611,110 @@ async def get_config():
             "learning_rate": settings.PPO_LEARNING_RATE,
             "gamma": settings.PPO_GAMMA,
             "epsilon": settings.PPO_EPSILON,
+            "epochs": settings.PPO_EPOCHS,
+            "batch_size": settings.PPO_BATCH_SIZE,
             "initial_temperature": settings.INITIAL_TEMPERATURE,
             "temperature_decay": settings.TEMPERATURE_DECAY,
-            "min_temperature": settings.MIN_TEMPERATURE
+            "min_temperature": settings.MIN_TEMPERATURE,
+            "regularization_coef": settings.REGULARIZATION_COEF
         },
         genetic={
             "population_size": settings.GA_POPULATION_SIZE,
             "mutation_rate": settings.GA_MUTATION_RATE,
             "crossover_rate": settings.GA_CROSSOVER_RATE,
-            "elite_size": settings.GA_ELITE_SIZE
+            "elite_size": settings.GA_ELITE_SIZE,
+            "max_generations": settings.GA_MAX_GENERATIONS,
+            "seed_range_min": settings.GA_SEED_RANGE_MIN,
+            "seed_range_max": settings.GA_SEED_RANGE_MAX,
+            "alpha": settings.GA_ALPHA
         },
         environment={
             "default_env": settings.DEFAULT_ENV,
-            "max_steps": settings.MAX_STEPS
+            "max_steps": settings.MAX_STEPS,
+            "total_episodes": settings.TOTAL_EPISODES,
+            "max_concurrent_training_tasks": settings.MAX_CONCURRENT_TRAINING_TASKS,
+            "max_concurrent_genetic_tasks": settings.MAX_CONCURRENT_GENETIC_TASKS
         }
     )
     
     return BaseResponse.success(data=config_data)
+
+
+@system_router.put(
+    "/config",
+    response_model=BaseResponse[ConfigDiffData],
+    summary="更新配置",
+    description="运行时更新配置，仅影响新启动的任务，运行中任务沿用启动时快照。非法值返回422。"
+)
+async def update_config(
+    request: ConfigUpdateRequest,
+    training_service: TrainingService = Depends(get_training_service),
+    genetic_service: GeneticService = Depends(get_genetic_service)
+):
+    """运行时更新配置"""
+    from ..config import config_manager
+    
+    updates_dict: Dict[str, Any] = {}
+    
+    if request.ppo is not None:
+        ppo_updates = request.ppo.model_dump(exclude_none=True)
+        if ppo_updates:
+            updates_dict["ppo"] = ppo_updates
+    
+    if request.genetic is not None:
+        genetic_updates = request.genetic.model_dump(exclude_none=True)
+        if genetic_updates:
+            updates_dict["genetic"] = genetic_updates
+    
+    if request.environment is not None:
+        env_updates = request.environment.model_dump(exclude_none=True)
+        if env_updates:
+            updates_dict["environment"] = env_updates
+    
+    if not updates_dict:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid configuration updates provided"
+        )
+    
+    try:
+        before, after = config_manager.apply_updates(updates_dict)
+    except ValueError as e:
+        logger.warning(f"Config update validation failed: {e}")
+        raise HTTPException(
+            status_code=422,
+            detail=str(e)
+        )
+    
+    changed_keys: List[str] = []
+    for category in before:
+        for key in before[category]:
+            changed_keys.append(f"{category}.{key}")
+    
+    if "environment" in updates_dict:
+        env_updates = updates_dict["environment"]
+        if "max_concurrent_training_tasks" in env_updates:
+            new_limit = env_updates["max_concurrent_training_tasks"]
+            training_service.update_max_concurrent_tasks(new_limit)
+            logger.info(f"Training service max concurrent tasks updated to {new_limit}")
+        
+        if "max_concurrent_genetic_tasks" in env_updates:
+            new_limit = env_updates["max_concurrent_genetic_tasks"]
+            genetic_service.update_max_concurrent_tasks(new_limit)
+            logger.info(f"Genetic service max concurrent tasks updated to {new_limit}")
+    
+    diff_data = ConfigDiffData(
+        before=before,
+        after=after,
+        changed_keys=changed_keys
+    )
+    
+    logger.info(f"Config hot-reload completed. Changed keys: {changed_keys}")
+    
+    return BaseResponse.success(
+        data=diff_data,
+        message="Configuration updated successfully"
+    )
 
 
 # 注册子路由

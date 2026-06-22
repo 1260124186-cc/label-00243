@@ -138,11 +138,69 @@ class ComparisonRequest(BaseModel):
         return v
 
 
+class PPOConfigUpdate(BaseModel):
+    """PPO配置更新"""
+    learning_rate: Optional[float] = Field(default=None, gt=0, le=1, description="学习率")
+    gamma: Optional[float] = Field(default=None, ge=0, le=1, description="折扣因子")
+    epsilon: Optional[float] = Field(default=None, ge=0, le=1, description="PPO裁剪参数")
+    epochs: Optional[int] = Field(default=None, ge=1, le=1000, description="迭代次数")
+    batch_size: Optional[int] = Field(default=None, ge=1, le=10000, description="批次大小")
+    initial_temperature: Optional[float] = Field(default=None, gt=0, description="初始温度")
+    temperature_decay: Optional[float] = Field(default=None, gt=0, le=1, description="温度衰减率")
+    min_temperature: Optional[float] = Field(default=None, gt=0, description="最小温度")
+    regularization_coef: Optional[float] = Field(default=None, ge=0, description="正则化系数")
+
+
+class GeneticConfigUpdate(BaseModel):
+    """遗传算法配置更新"""
+    population_size: Optional[int] = Field(default=None, ge=10, le=1000, description="种群大小")
+    mutation_rate: Optional[float] = Field(default=None, ge=0, le=1, description="变异率")
+    crossover_rate: Optional[float] = Field(default=None, ge=0, le=1, description="交叉率")
+    elite_size: Optional[int] = Field(default=None, ge=1, le=50, description="精英保留数量")
+    max_generations: Optional[int] = Field(default=None, ge=1, le=10000, description="最大代数")
+    seed_range_min: Optional[int] = Field(default=None, ge=0, description="种子最小值")
+    seed_range_max: Optional[int] = Field(default=None, ge=1, description="种子最大值")
+    alpha: Optional[float] = Field(default=None, ge=0, le=1, description="双目标适应度权重")
+
+
+class EnvironmentConfigUpdate(BaseModel):
+    """环境配置更新"""
+    default_env: Optional[str] = Field(default=None, min_length=1, description="默认环境名称")
+    max_steps: Optional[int] = Field(default=None, ge=100, le=10000, description="每回合最大步数")
+    total_episodes: Optional[int] = Field(default=None, ge=1, le=100000, description="总训练回合数")
+    max_concurrent_training_tasks: Optional[int] = Field(default=None, ge=1, le=100, description="训练任务并发上限")
+    max_concurrent_genetic_tasks: Optional[int] = Field(default=None, ge=1, le=100, description="遗传算法任务并发上限")
+
+
 class ConfigUpdateRequest(BaseModel):
     """配置更新请求"""
-    ppo: Optional[Dict[str, Any]] = Field(default=None, description="PPO配置")
-    genetic: Optional[Dict[str, Any]] = Field(default=None, description="遗传算法配置")
-    environment: Optional[Dict[str, Any]] = Field(default=None, description="环境配置")
+    ppo: Optional[PPOConfigUpdate] = Field(default=None, description="PPO配置")
+    genetic: Optional[GeneticConfigUpdate] = Field(default=None, description="遗传算法配置")
+    environment: Optional[EnvironmentConfigUpdate] = Field(default=None, description="环境配置")
+
+    @model_validator(mode='after')
+    def check_at_least_one_config(self):
+        if self.ppo is None and self.genetic is None and self.environment is None:
+            raise ValueError("At least one configuration category must be provided")
+        
+        has_updates = False
+        if self.ppo is not None:
+            ppo_dict = self.ppo.model_dump(exclude_none=True)
+            if ppo_dict:
+                has_updates = True
+        if self.genetic is not None:
+            genetic_dict = self.genetic.model_dump(exclude_none=True)
+            if genetic_dict:
+                has_updates = True
+        if self.environment is not None:
+            env_dict = self.environment.model_dump(exclude_none=True)
+            if env_dict:
+                has_updates = True
+        
+        if not has_updates:
+            raise ValueError("At least one configuration value must be provided")
+        
+        return self
 
 
 class PageRequest(BaseModel):

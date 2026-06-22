@@ -292,21 +292,85 @@ class TestVisualizationRequestValidation:
 
 class TestConfigUpdateRequest:
     def test_create_with_ppo_config(self):
-        from src.schemas.requests import ConfigUpdateRequest
-        req = ConfigUpdateRequest(ppo={"learning_rate": 0.001})
-        assert req.ppo == {"learning_rate": 0.001}
+        from src.schemas.requests import ConfigUpdateRequest, PPOConfigUpdate
+        req = ConfigUpdateRequest(ppo=PPOConfigUpdate(learning_rate=0.001))
+        assert req.ppo is not None
+        assert req.ppo.learning_rate == 0.001
         assert req.genetic is None
 
     def test_create_with_all_configs(self):
-        from src.schemas.requests import ConfigUpdateRequest
-        req = ConfigUpdateRequest(
-            ppo={"learning_rate": 0.001},
-            genetic={"population_size": 100},
-            environment={"env_name": "CartPole-v1"}
+        from src.schemas.requests import (
+            ConfigUpdateRequest, PPOConfigUpdate,
+            GeneticConfigUpdate, EnvironmentConfigUpdate
         )
-        assert req.ppo == {"learning_rate": 0.001}
-        assert req.genetic == {"population_size": 100}
-        assert req.environment == {"env_name": "CartPole-v1"}
+        req = ConfigUpdateRequest(
+            ppo=PPOConfigUpdate(learning_rate=0.001),
+            genetic=GeneticConfigUpdate(population_size=100),
+            environment=EnvironmentConfigUpdate(default_env="CartPole-v1")
+        )
+        assert req.ppo is not None
+        assert req.ppo.learning_rate == 0.001
+        assert req.genetic is not None
+        assert req.genetic.population_size == 100
+        assert req.environment is not None
+        assert req.environment.default_env == "CartPole-v1"
+
+    def test_at_least_one_config_required(self):
+        from src.schemas.requests import ConfigUpdateRequest
+        with pytest.raises(Exception):
+            ConfigUpdateRequest()
+
+    def test_empty_configs_not_allowed(self):
+        from src.schemas.requests import ConfigUpdateRequest, PPOConfigUpdate
+        ppo = PPOConfigUpdate()
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(ppo=ppo)
+
+    def test_invalid_ppo_learning_rate(self):
+        from src.schemas.requests import ConfigUpdateRequest, PPOConfigUpdate
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(ppo=PPOConfigUpdate(learning_rate=-0.1))
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(ppo=PPOConfigUpdate(learning_rate=1.5))
+
+    def test_invalid_genetic_population_size(self):
+        from src.schemas.requests import ConfigUpdateRequest, GeneticConfigUpdate
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(genetic=GeneticConfigUpdate(population_size=5))
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(genetic=GeneticConfigUpdate(population_size=2000))
+
+    def test_invalid_environment_max_steps(self):
+        from src.schemas.requests import ConfigUpdateRequest, EnvironmentConfigUpdate
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(environment=EnvironmentConfigUpdate(max_steps=50))
+        with pytest.raises(Exception):
+            ConfigUpdateRequest(environment=EnvironmentConfigUpdate(max_steps=20000))
+
+    def test_valid_config_update(self):
+        from src.schemas.requests import (
+            ConfigUpdateRequest, PPOConfigUpdate,
+            GeneticConfigUpdate, EnvironmentConfigUpdate
+        )
+        req = ConfigUpdateRequest(
+            ppo=PPOConfigUpdate(
+                learning_rate=0.001,
+                epsilon=0.3,
+                regularization_coef=0.05
+            ),
+            genetic=GeneticConfigUpdate(
+                mutation_rate=0.15,
+                crossover_rate=0.8,
+                population_size=100
+            ),
+            environment=EnvironmentConfigUpdate(
+                max_concurrent_training_tasks=3,
+                max_concurrent_genetic_tasks=4
+            )
+        )
+        assert req.ppo.learning_rate == 0.001
+        assert req.genetic.mutation_rate == 0.15
+        assert req.environment.max_concurrent_training_tasks == 3
 
 
 class TestPageRequest:

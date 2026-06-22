@@ -211,6 +211,14 @@ class ConfigData(BaseModel):
     environment: Dict[str, Any]
 
 
+class ConfigDiffData(BaseModel):
+    """配置变更差异数据"""
+    before: Dict[str, Any] = Field(description="变更前配置")
+    after: Dict[str, Any] = Field(description="变更后配置")
+    changed_keys: List[str] = Field(description="变更的键列表")
+    timestamp: datetime = Field(default_factory=datetime.now, description="变更时间")
+
+
 class PipelineStageData(BaseModel):
     stage_name: str = Field(description="阶段名称: ppo_training, weight_export, ga_search, comparison_report")
     status: str = Field(description="阶段状态: pending, running, completed, failed, skipped")

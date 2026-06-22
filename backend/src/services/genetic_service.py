@@ -127,9 +127,10 @@ def _genetic_worker_evaluate(args: Tuple[Any, ...]) -> float:
 class GeneticTask:
     """遗传算法任务"""
 
-    def __init__(self, task_id: str, config: GeneticStartRequest):
+    def __init__(self, task_id: str, config: GeneticStartRequest, config_snapshot: Optional[Any] = None):
         self.task_id = task_id
         self.config = config
+        self.config_snapshot = config_snapshot
         self.status = "pending"
         self.current_generation = 0
         self.max_generations = config.max_generations
@@ -163,7 +164,7 @@ class GeneticService:
 
     def __init__(
         self,
-        max_concurrent_tasks: int = 2,
+        max_concurrent_tasks: Optional[int] = None,
         max_parallel_workers: Optional[int] = None,
         use_parallel_eval: bool = True,
     ):
@@ -173,6 +174,11 @@ class GeneticService:
             max_parallel_workers: 单个任务内并行评估个体的进程数（默认=cpu_count()//2）
             use_parallel_eval: 是否启用多进程并行评估（关闭则退化为串行）
         """
+        from ..config import settings
+        if max_concurrent_tasks is None:
+            max_concurrent_tasks = settings.MAX_CONCURRENT_GENETIC_TASKS
+
+        self.max_concurrent_tasks = max_concurrent_tasks
         self.tasks: Dict[str, GeneticTask] = {}
         self.executor = ThreadPoolExecutor(max_workers=max_concurrent_tasks)
         self._lock = threading.Lock()
@@ -193,6 +199,26 @@ class GeneticService:
             f"use_parallel_eval={use_parallel_eval}, max_parallel_workers={self.max_parallel_workers}"
         )
 
+    def update_max_concurrent_tasks(self, new_max: int) -> None:
+        """
+        更新并发任务上限
+
+        Args:
+            new_max: 新的并发上限
+        """
+        with self._lock:
+            old_max = self.max_concurrent_tasks
+            self.max_concurrent_tasks = new_max
+
+            old_executor = self.executor
+            self.executor = ThreadPoolExecutor(max_workers=new_max)
+
+            old_executor.shutdown(wait=False, cancel_futures=False)
+
+            logger.info(
+                f"GeneticService max_concurrent_tasks updated: {old_max} -> {new_max}"
+            )
+
     def start_search(self, request: GeneticStartRequest) -> str:
         """
         启动遗传算法搜索
@@ -203,15 +229,21 @@ class GeneticService:
         Returns:
             任务ID
         """
+        from ..config import create_config_snapshot
+
         task_id = str(uuid.uuid4())
-        task = GeneticTask(task_id, request)
+        config_snapshot = create_config_snapshot()
+        task = GeneticTask(task_id, request, config_snapshot)
 
         with self._lock:
             self.tasks[task_id] = task
 
         self.executor.submit(self._run_search, task)
 
-        logger.info(f"Genetic search task {task_id} started")
+        logger.info(
+            f"Genetic search task {task_id} started, "
+            f"snapshot_time: {config_snapshot.snapshot_time}"
+        )
         return task_id
 
     def _run_search(self, task: GeneticTask) -> None:
