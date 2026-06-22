@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files (optional - remove if you want tests in container)
+# tests/
+# test_plots/
+
+# Logs and models (will be created at runtime)
+logs/*.log
+plots/*.png
+
+# Documentation
+*.md
+!README.md
+
+# Temporary
+tmp/
+temp/
+*.tmp
