@@ -166,8 +166,45 @@ class ComparisonResultData(BaseModel):
 
 class VisualizationData(BaseModel):
     """可视化数据"""
-    task_id: str = Field(description="任务ID")
-    image_base64: str = Field(description="Base64编码的图片")
+    task_id: str = Field(description="任务ID，原始数据时为'custom'")
+    chart_type: str = Field(description="图表类型: fitness_curve, dashboard, progress, comparison")
+    image_base64: Optional[str] = Field(default=None, description="Base64编码的图片（format=base64/both时返回）")
+    file_url: Optional[str] = Field(default=None, description="图片文件URL（format=file_url/both且save_to_plots=true时返回）")
+    file_path: Optional[str] = Field(default=None, description="图片本地绝对路径（save_to_plots=true时返回）")
+    image_type: str = Field(default="png", description="图片类型")
+    generated_at: datetime = Field(default_factory=datetime.now, description="生成时间")
+
+
+class VisualizationGenerateData(BaseModel):
+    """可视化生成响应数据"""
+    task_id: Optional[str] = Field(default=None, description="关联的任务ID（如果通过task_id生成）")
+    chart_type: str = Field(description="生成的图表类型")
+    format: str = Field(description="输出格式: base64, file_url, both")
+    image_base64: Optional[str] = Field(default=None, description="Base64编码的图片（format=base64/both时返回）")
+    file_url: Optional[str] = Field(default=None, description="图片文件访问URL（format=file_url/both且保存了文件时返回）")
+    file_path: Optional[str] = Field(default=None, description="图片本地文件路径（保存时返回）")
+    image_type: str = Field(default="png", description="图片类型")
+    width: int = Field(default=0, description="图片宽度（像素）")
+    height: int = Field(default=0, description="图片高度（像素）")
+    stats: Optional[Dict[str, Any]] = Field(default=None, description="附加统计信息（如适应度统计、数据摘要等）")
+    generated_at: datetime = Field(default_factory=datetime.now, description="生成时间")
+
+
+class VisualizationComparisonData(BaseModel):
+    """可视化对比响应数据（返回箱线图+直方图）"""
+    format: str = Field(description="输出格式: base64, file_url, both")
+    boxplot_base64: Optional[str] = Field(default=None, description="箱线图Base64（format=base64/both时返回）")
+    histogram_base64: Optional[str] = Field(default=None, description="直方图Base64（format=base64/both时返回）")
+    combined_base64: Optional[str] = Field(default=None, description="组合图Base64（箱线图+直方图并列展示，format=base64/both时返回）")
+    boxplot_url: Optional[str] = Field(default=None, description="箱线图文件URL")
+    histogram_url: Optional[str] = Field(default=None, description="直方图文件URL")
+    combined_url: Optional[str] = Field(default=None, description="组合图文件URL")
+    boxplot_path: Optional[str] = Field(default=None, description="箱线图本地路径")
+    histogram_path: Optional[str] = Field(default=None, description="直方图本地路径")
+    combined_path: Optional[str] = Field(default=None, description="组合图本地路径")
+    differentiable_stats: Dict[str, Any] = Field(description="可微网络统计：mean, std, min, max, median, passed")
+    non_differentiable_stats: Dict[str, Any] = Field(description="不可微网络统计：mean, std, min, max, median, passed")
+    performance_gap: float = Field(description="性能差距：mean(diff) - mean(non_diff)")
     image_type: str = Field(default="png", description="图片类型")
     generated_at: datetime = Field(default_factory=datetime.now, description="生成时间")
 

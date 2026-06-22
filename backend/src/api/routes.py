@@ -1,8 +1,9 @@
 """
 API路由模块
 """
+import os
 from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from loguru import logger
 
 from ..schemas.requests import (
@@ -13,7 +14,8 @@ from ..schemas.requests import (
     ConfigUpdateRequest,
     PageRequest,
     VisualizationRequest,
-    PipelineStartRequest
+    PipelineStartRequest,
+    VisualizationComparisonQuery
 )
 from ..schemas.responses import (
     BaseResponse,
@@ -31,6 +33,8 @@ from ..schemas.responses import (
     ConfigData,
     ConfigDiffData,
     VisualizationData,
+    VisualizationGenerateData,
+    VisualizationComparisonData,
     TrainingDashboardData,
     GeneticProgressData,
     PipelineStatusData,
@@ -475,11 +479,407 @@ async def generate_fitness_curve(
     
     result = VisualizationData(
         task_id="custom",
+        chart_type="fitness_curve",
         image_base64=image_base64,
         image_type="png"
     )
     
     return BaseResponse.success(data=result)
+
+
+def _resolve_task_type(
+    task_id: str,
+    training_service: TrainingService,
+    genetic_service: GeneticService,
+    explicit_task_type: Optional[str] = None
+) -> str:
+    """
+    解析task_id对应的任务类型
+    优先使用显式指定，否则在两个服务中查找
+    """
+    if explicit_task_type in ("training", "genetic"):
+        return explicit_task_type
+
+    with training_service._lock:
+        if task_id in training_service.tasks:
+            return "training"
+
+    with genetic_service._lock:
+        if task_id in genetic_service.tasks:
+            return "genetic"
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"Task {task_id} not found in training or genetic services"
+    )
+
+
+def _collect_data_for_chart(
+    request: VisualizationRequest,
+    training_service: TrainingService,
+    genetic_service: GeneticService
+) -> Dict[str, Any]:
+    """
+    根据请求收集图表所需的数据：
+    - 提供raw_data则直接返回
+    - 提供task_id则从服务中拉取
+    """
+    if request.raw_data is not None:
+        return request.raw_data
+
+    assert request.task_id is not None
+    task_type = _resolve_task_type(request.task_id, training_service, genetic_service, request.task_type)
+
+    data: Dict[str, Any] = {}
+
+    if request.chart_type == "fitness_curve":
+        if task_type == "training":
+            history, _ = training_service.get_history(request.task_id, 1, 100000)
+            data["fitness_history"] = [h.reward for h in history]
+        else:
+            task = genetic_service.tasks.get(request.task_id)
+            fh = task.ga.fitness_history if (task and task.ga) else []
+            data["fitness_history"] = list(fh)
+
+    elif request.chart_type == "dashboard":
+        if task_type != "training":
+            raise HTTPException(
+                status_code=400,
+                detail="dashboard chart_type requires a training task"
+            )
+        history, _ = training_service.get_history(request.task_id, 1, 100000)
+        data["episode_rewards"] = [h.reward for h in history]
+        data["policy_losses"] = [h.policy_loss for h in history if h.policy_loss is not None]
+        data["value_losses"] = [h.value_loss for h in history if h.value_loss is not None]
+        data["temperatures"] = [h.temperature for h in history if h.temperature is not None]
+
+    elif request.chart_type == "progress":
+        if task_type != "genetic":
+            raise HTTPException(
+                status_code=400,
+                detail="progress chart_type requires a genetic task"
+            )
+        task = genetic_service.tasks.get(request.task_id)
+        fh = list(task.ga.fitness_history) if (task and task.ga) else []
+        data["fitness_history"] = fh
+        if task and task.ga and hasattr(task.ga, "avg_fitness_history"):
+            data["avg_fitness_history"] = list(task.ga.avg_fitness_history)
+
+    elif request.chart_type == "comparison":
+        raise HTTPException(
+            status_code=400,
+            detail="comparison chart_type via POST /generate requires raw_data with diff_rewards & non_diff_rewards. "
+                   "Use GET /visualization/comparison for task_id-based comparison."
+        )
+
+    return data
+
+
+@visualization_router.post(
+    "/generate",
+    response_model=BaseResponse[VisualizationGenerateData],
+    summary="生成可视化图表",
+    description="""根据task_id或raw_data生成指定类型的可视化图表。
+
+支持图表类型：
+- **fitness_curve**: 适应度曲线（训练/遗传都支持）
+- **dashboard**: 训练仪表板（仅训练任务）
+- **progress**: 遗传算法进度（仅遗传任务）
+- **comparison**: 对比图（仅raw_data，需提供diff_rewards和non_diff_rewards）
+
+输出格式：
+- **base64**: 仅返回Base64编码图片（默认）
+- **file_url**: 仅返回文件URL（自动保存到plots/）
+- **both**: 同时返回两者
+"""
+)
+async def generate_visualization(
+    request: VisualizationRequest,
+    training_service: TrainingService = Depends(get_training_service),
+    genetic_service: GeneticService = Depends(get_genetic_service),
+    viz_service: VisualizationService = Depends(get_visualization_service)
+):
+    """生成可视化图表"""
+    logger.info(
+        f"Generating visualization: chart_type={request.chart_type}, "
+        f"task_id={request.task_id}, format={request.format}, save={request.save_to_plots}"
+    )
+
+    try:
+        data = _collect_data_for_chart(request, training_service, genetic_service)
+    except HTTPException:
+        raise
+
+    try:
+        result = viz_service.generate(
+            chart_type=request.chart_type,
+            data=data,
+            task_id=request.task_id,
+            window_size=request.window_size,
+            save_to_plots=request.save_to_plots,
+            fmt=request.format,
+            title=request.title,
+            xlabel=request.xlabel,
+            ylabel=request.ylabel,
+            show_avg=request.show_avg
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    response_data = VisualizationGenerateData(
+        task_id=request.task_id,
+        chart_type=request.chart_type,
+        format=request.format,
+        image_base64=result.get("image_base64"),
+        file_url=result.get("file_url"),
+        file_path=result.get("file_path"),
+        image_type="png",
+        width=result.get("width", 0),
+        height=result.get("height", 0),
+        stats=result.get("stats")
+    )
+
+    return BaseResponse.success(data=response_data, message=f"{request.chart_type} generated")
+
+
+async def _collect_comparison_rewards(
+    query: VisualizationComparisonQuery,
+    training_service: TrainingService,
+    genetic_service: GeneticService,
+    evaluation_service: EvaluationService
+) -> tuple[List[float], List[float]]:
+    """
+    根据GET /comparison查询参数，提取(diff_rewards, non_diff_rewards)
+    三种数据源：
+    1. diff_rewards + non_diff_rewards 直接传
+    2. differentiable_model_path + genetic_seeds -> 调用评估服务
+    3. differentiable_task_id + genetic_task_id -> 从任务中取模型/种子，再调用评估
+    """
+    # 情况1：直接传rewards
+    if query.diff_rewards is not None and query.non_diff_rewards is not None:
+        return list(query.diff_rewards), list(query.non_diff_rewards)
+
+    diff_model_path: Optional[str] = None
+    genetic_seeds: Optional[List[int]] = None
+
+    # 情况2：模型路径 + 种子
+    if query.differentiable_model_path and query.genetic_seeds:
+        diff_model_path = query.differentiable_model_path
+        genetic_seeds = list(query.genetic_seeds)
+
+    # 情况3：task_id 对
+    elif query.differentiable_task_id and query.genetic_task_id:
+        # 从训练任务取保存的模型路径
+        try:
+            tstatus = training_service.get_status(query.differentiable_task_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Training task {query.differentiable_task_id} not found: {e}"
+            )
+        from ..config import settings
+        model_candidate = os.path.join(settings.MODEL_SAVE_DIR, f"ppo_{query.differentiable_task_id}.pt")
+        if not os.path.exists(model_candidate):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot find model for training task {query.differentiable_task_id}. "
+                       f"Expected at {model_candidate}"
+            )
+        diff_model_path = model_candidate
+
+        # 从遗传任务取最佳个体的种子
+        try:
+            best = genetic_service.get_best_individual(query.genetic_task_id)
+        except Exception as e:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Genetic task {query.genetic_task_id} not found or no best individual: {e}"
+            )
+        genetic_seeds = [s for row in best.seeds for s in row]
+
+    if diff_model_path is None or genetic_seeds is None:
+        raise HTTPException(status_code=400, detail="Invalid comparison data source")
+
+    # 执行评估获取两组rewards
+    diff_req = EvaluationRequest(
+        network_type="differentiable",
+        num_episodes=query.num_episodes,
+        model_path=diff_model_path,
+        env_name="LunarLander-v2"
+    )
+    # 直接使用底层方法获取每回合rewards
+    diff_rewards = _evaluate_and_get_rewards(evaluation_service, diff_req, genetic_seeds, mode="diff")
+    non_diff_rewards = _evaluate_and_get_rewards(evaluation_service, diff_req, genetic_seeds, mode="non_diff")
+
+    return diff_rewards, non_diff_rewards
+
+
+def _evaluate_and_get_rewards(
+    service: EvaluationService,
+    diff_req: EvaluationRequest,
+    genetic_seeds: List[int],
+    mode: str
+) -> List[float]:
+    """
+    执行评估并获取每回合奖励列表。
+    这里复用evaluation_service的实现逻辑，但收集各episode奖励而不是聚合统计。
+    """
+    import uuid
+    import gymnasium as gym
+    import torch
+    import numpy as np
+    from ..models.network import NonDifferentiableNetwork, DifferentiableNetwork
+    from ..models.genetic_algorithm import Individual, WeightGenerator
+
+    env_name = diff_req.env_name
+    num_episodes = diff_req.num_episodes
+
+    env = gym.make(env_name)
+    state_dim = env.observation_space.shape[0]
+    action_dim = env.action_space.n
+
+    try:
+        if mode == "diff":
+            network = DifferentiableNetwork(state_dim=state_dim, action_dim=action_dim)
+            checkpoint = torch.load(diff_req.model_path, map_location='cpu')
+            if 'policy_state_dict' in checkpoint:
+                network.load_state_dict(checkpoint['policy_state_dict'])
+            else:
+                network.load_state_dict(checkpoint)
+        else:
+            individual = Individual.create_from_list(genetic_seeds)
+            network = NonDifferentiableNetwork(state_dim=state_dim, action_dim=action_dim)
+            wg = WeightGenerator()
+            shapes = {name: tuple(p.shape) for name, p in network.named_parameters()}
+            weights = wg.generate_weights_from_individual(individual, shapes)
+            wg.apply_weights_to_network(network, weights)
+
+        network.eval()
+        rewards: List[float] = []
+        for _ in range(num_episodes):
+            state, _ = env.reset()
+            ep = 0.0
+            while True:
+                with torch.no_grad():
+                    logits = network(torch.FloatTensor(state))
+                    action = logits.argmax().item()
+                next_state, r, term, trunc, _ = env.step(action)
+                ep += r
+                state = next_state
+                if term or trunc:
+                    break
+            rewards.append(ep)
+        return rewards
+    finally:
+        env.close()
+
+
+@visualization_router.get(
+    "/comparison",
+    response_model=BaseResponse[VisualizationComparisonData],
+    summary="生成网络对比可视化",
+    description="""生成可微网络 vs 不可微网络的对比可视化。
+
+三种数据源（任选其一）：
+1. **直接传评估结果**：`diff_rewards` + `non_diff_rewards`（逗号分隔的数值）
+2. **模型+种子**：`differentiable_model_path` + `genetic_seeds`（24个整数种子）
+3. **任务ID对**：`differentiable_task_id`（PPO训练任务） + `genetic_task_id`（GA任务）
+
+输出包含：
+- 独立的**箱线图**（Base64/URL/path）
+- 独立的**直方图**（Base64/URL/path）
+- **组合图**（箱线+直方图并列）
+
+输出格式通过`format`控制：`base64` | `file_url` | `both`
+"""
+)
+async def get_visualization_comparison(
+    differentiable_task_id: Optional[str] = Query(None, description="PPO训练任务ID"),
+    genetic_task_id: Optional[str] = Query(None, description="遗传算法任务ID"),
+    differentiable_model_path: Optional[str] = Query(None, description="可微网络模型文件路径"),
+    genetic_seeds: Optional[str] = Query(None, description="24个整数种子（逗号分隔）"),
+    diff_rewards: Optional[str] = Query(None, description="可微网络奖励列表（逗号分隔）"),
+    non_diff_rewards: Optional[str] = Query(None, description="不可微网络奖励列表（逗号分隔）"),
+    num_episodes: int = Query(10, ge=1, le=500, description="评估回合数"),
+    format: str = Query("base64", pattern="^(base64|file_url|both)$", description="输出格式"),
+    save_to_plots: bool = Query(False, description="是否保存图片到plots/"),
+    title: Optional[str] = Query(None, description="图表标题"),
+    training_service: TrainingService = Depends(get_training_service),
+    genetic_service: GeneticService = Depends(get_genetic_service),
+    evaluation_service: EvaluationService = Depends(get_evaluation_service),
+    viz_service: VisualizationService = Depends(get_visualization_service)
+):
+    """生成对比可视化（箱线图+直方图）"""
+    import os
+
+    def _parse_float_list(s: Optional[str]) -> Optional[List[float]]:
+        if not s:
+            return None
+        return [float(x.strip()) for x in s.split(",") if x.strip()]
+
+    def _parse_int_list(s: Optional[str]) -> Optional[List[int]]:
+        if not s:
+            return None
+        return [int(x.strip()) for x in s.split(",") if x.strip()]
+
+    parsed_seeds = _parse_int_list(genetic_seeds)
+    parsed_diff_rewards = _parse_float_list(diff_rewards)
+    parsed_non_diff_rewards = _parse_float_list(non_diff_rewards)
+
+    try:
+        query = VisualizationComparisonQuery(
+            differentiable_task_id=differentiable_task_id,
+            genetic_task_id=genetic_task_id,
+            differentiable_model_path=differentiable_model_path,
+            genetic_seeds=parsed_seeds,
+            diff_rewards=parsed_diff_rewards,
+            non_diff_rewards=parsed_non_diff_rewards,
+            num_episodes=num_episodes,
+            format=format,  # type: ignore[arg-type]
+            save_to_plots=save_to_plots,
+            title=title
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    diff_r, non_diff_r = await _collect_comparison_rewards(
+        query, training_service, genetic_service, evaluation_service
+    )
+
+    if not diff_r or not non_diff_r:
+        raise HTTPException(status_code=400, detail="Empty reward lists for comparison")
+
+    logger.info(
+        f"Generating comparison visualization: diff_n={len(diff_r)}, "
+        f"non_diff_n={len(non_diff_r)}, format={format}, save={save_to_plots}"
+    )
+
+    result = viz_service.generate_comparison(
+        diff_rewards=diff_r,
+        non_diff_rewards=non_diff_r,
+        save_to_plots=save_to_plots,
+        fmt=query.format,
+        title=title
+    )
+
+    response_data = VisualizationComparisonData(
+        format=query.format,
+        boxplot_base64=result.get("boxplot_base64"),
+        histogram_base64=result.get("histogram_base64"),
+        combined_base64=result.get("combined_base64"),
+        boxplot_url=result.get("boxplot_url"),
+        histogram_url=result.get("histogram_url"),
+        combined_url=result.get("combined_url"),
+        boxplot_path=result.get("boxplot_path"),
+        histogram_path=result.get("histogram_path"),
+        combined_path=result.get("combined_path"),
+        differentiable_stats=result["differentiable_stats"],
+        non_differentiable_stats=result["non_differentiable_stats"],
+        performance_gap=result["performance_gap"],
+        image_type="png"
+    )
+
+    return BaseResponse.success(data=response_data, message="Comparison visualization generated")
 
 
 # ==================== 流水线接口 ====================

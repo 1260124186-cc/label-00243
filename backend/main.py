@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 # 添加src到路径
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     # 创建必要目录
     os.makedirs(settings.MODEL_SAVE_DIR, exist_ok=True)
     os.makedirs("logs", exist_ok=True)
+    os.makedirs("plots", exist_ok=True)
     
     yield
     
@@ -121,6 +123,11 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 # 注册路由
 app.include_router(router)
+
+# 挂载plots静态文件目录（file_url可访问）
+_plots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
+os.makedirs(_plots_dir, exist_ok=True)
+app.mount("/plots", StaticFiles(directory=_plots_dir), name="plots")
 
 
 # 根路径

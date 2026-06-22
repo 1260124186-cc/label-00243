@@ -232,18 +232,117 @@ class PipelineStartRequest(BaseModel):
 
 
 class VisualizationRequest(BaseModel):
-    """可视化请求"""
-    task_id: str = Field(description="任务ID")
-    chart_type: str = Field(
-        default="fitness_curve",
-        description="图表类型: fitness_curve, dashboard, progress"
+    """可视化生成请求"""
+    chart_type: Literal["fitness_curve", "dashboard", "progress", "comparison"] = Field(
+        description="图表类型: fitness_curve(适应度曲线), dashboard(训练仪表板), progress(遗传算法进度), comparison(对比图)"
     )
-    window_size: int = Field(default=10, ge=1, le=100, description="移动平均窗口大小")
-    
-    @field_validator('chart_type')
+    task_id: Optional[str] = Field(
+        default=None,
+        description="任务ID（与raw_data二选一，优先使用task_id从对应服务拉取数据）"
+    )
+    task_type: Optional[Literal["training", "genetic"]] = Field(
+        default=None,
+        description="任务类型：training(训练任务)、genetic(遗传任务)，当task_id存在时可自动推断，无法推断时需显式指定"
+    )
+    raw_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="原始数据（与task_id二选一）。键说明：\n- fitness_curve/progress: {fitness_history: List[float], avg_fitness_history?: List[float]}\n- dashboard: {episode_rewards: List[float], policy_losses?: List[float], value_losses?: List[float], temperatures?: List[float]}\n- comparison: {diff_rewards: List[float], non_diff_rewards: List[float]}"
+    )
+    window_size: int = Field(default=10, ge=1, le=500, description="移动平均窗口大小")
+    save_to_plots: bool = Field(default=False, description="是否将图片保存到plots/目录")
+    format: Literal["base64", "file_url", "both"] = Field(
+        default="base64",
+        description="输出格式：base64(仅Base64编码)、file_url(仅文件URL)、both(两者都返回)"
+    )
+    title: Optional[str] = Field(default=None, description="图表标题（可选，不传则自动生成）")
+    xlabel: Optional[str] = Field(default=None, description="X轴标签（可选）")
+    ylabel: Optional[str] = Field(default=None, description="Y轴标签（可选）")
+    show_avg: bool = Field(default=True, description="fitness_curve下是否显示移动平均线")
+
+    @model_validator(mode='after')
+    def validate_task_id_or_raw_data(self):
+        if self.task_id is None and self.raw_data is None:
+            raise ValueError("Either task_id or raw_data must be provided")
+        if self.task_id is not None and self.raw_data is not None:
+            raise ValueError("Only one of task_id or raw_data should be provided")
+        return self
+
+    @model_validator(mode='after')
+    def validate_raw_data_required_keys(self):
+        if self.raw_data is None:
+            return self
+        ct = self.chart_type
+        keys = list(self.raw_data.keys())
+        if ct == "fitness_curve":
+            if "fitness_history" not in self.raw_data:
+                raise ValueError("raw_data must contain 'fitness_history' for fitness_curve chart")
+        elif ct == "progress":
+            if "fitness_history" not in self.raw_data:
+                raise ValueError("raw_data must contain 'fitness_history' for progress chart")
+        elif ct == "dashboard":
+            if "episode_rewards" not in self.raw_data:
+                raise ValueError("raw_data must contain 'episode_rewards' for dashboard chart")
+        elif ct == "comparison":
+            if "diff_rewards" not in self.raw_data or "non_diff_rewards" not in self.raw_data:
+                raise ValueError("raw_data must contain 'diff_rewards' and 'non_diff_rewards' for comparison chart")
+        return self
+
+
+class VisualizationComparisonQuery(BaseModel):
+    """可视化对比查询参数（用于GET /comparison）"""
+    differentiable_task_id: Optional[str] = Field(
+        default=None,
+        description="可微网络（PPO训练）任务ID，与genetic_task_id配对使用"
+    )
+    genetic_task_id: Optional[str] = Field(
+        default=None,
+        description="不可微网络（遗传算法）任务ID，与differentiable_task_id配对使用"
+    )
+    differentiable_model_path: Optional[str] = Field(
+        default=None,
+        description="可微网络模型文件路径（与differentiable_task_id二选一）"
+    )
+    genetic_seeds: Optional[List[int]] = Field(
+        default=None,
+        description="不可微网络的24个种子（与genetic_task_id二选一）"
+    )
+    diff_rewards: Optional[List[float]] = Field(
+        default=None,
+        description="可微网络的评估奖励列表（直接传评估结果数据）"
+    )
+    non_diff_rewards: Optional[List[float]] = Field(
+        default=None,
+        description="不可微网络的评估奖励列表（直接传评估结果数据）"
+    )
+    num_episodes: int = Field(default=10, ge=1, le=500, description="从task_id/模型/种子生成评估数据时的评估回合数")
+    format: Literal["base64", "file_url", "both"] = Field(
+        default="base64",
+        description="输出格式：base64(仅Base64编码)、file_url(仅文件URL)、both(两者都返回)"
+    )
+    save_to_plots: bool = Field(default=False, description="是否将图片保存到plots/目录")
+    title: Optional[str] = Field(default=None, description="图表标题（可选）")
+
+    @model_validator(mode='after')
+    def validate_data_source(self):
+        has_tasks = self.differentiable_task_id is not None and self.genetic_task_id is not None
+        has_model_seeds = self.differentiable_model_path is not None and self.genetic_seeds is not None
+        has_rewards = self.diff_rewards is not None and self.non_diff_rewards is not None
+
+        sources = sum([has_tasks, has_model_seeds, has_rewards])
+        if sources == 0:
+            raise ValueError(
+                "Must provide one of: "
+                "(differentiable_task_id + genetic_task_id), "
+                "(differentiable_model_path + genetic_seeds), "
+                "or (diff_rewards + non_diff_rewards)"
+            )
+        if sources > 1:
+            raise ValueError("Only one data source combination should be provided")
+        return self
+
+    @field_validator('genetic_seeds')
     @classmethod
-    def validate_chart_type(cls, v):
-        allowed = ['fitness_curve', 'dashboard', 'progress', 'comparison']
-        if v not in allowed:
-            raise ValueError(f'chart_type must be one of {allowed}')
+    def validate_genetic_seeds(cls, v):
+        if v is not None and len(v) != 24:
+            raise ValueError('genetic_seeds must contain exactly 24 integers (4 rows x 6 columns)')
         return v

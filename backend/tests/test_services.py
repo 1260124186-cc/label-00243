@@ -943,3 +943,296 @@ def test_maybe_auto_start_ga_success():
     ga_task = genetic_service.tasks[task.child_ga_task_id]
     assert ga_task.parent_task_id == "test-auto-success"
     assert ga_task.config.target_weights_path == "/tmp/fake_model.pt"
+
+
+# ==================== 新增: VisualizationService generate() 方法测试 ====================
+
+
+def test_visualization_service_generate_fitness_curve_raw_data():
+    service = VisualizationService(output_dir="/tmp/test_plots_1")
+    result = service.generate(
+        chart_type="fitness_curve",
+        data={"fitness_history": [50.0, 80.0, 120.0, 150.0, 200.0, 210.0]},
+        task_id="test-task-001",
+        window_size=3,
+        save_to_plots=False,
+        fmt="base64",
+    )
+    assert "image_base64" in result
+    assert result["image_base64"] is not None
+    assert isinstance(result["image_base64"], str)
+    assert len(result["image_base64"]) > 0
+    assert "stats" in result
+    assert result["stats"]["mean"] == pytest.approx(135.0)
+    assert result["stats"]["max"] == 210.0
+    assert result["stats"]["count"] == 6
+    assert result["stats"]["passed"] is False
+    assert result["width"] == 1500
+    assert result["height"] == 900
+    # format=base64 且 save=false -> 不应有文件相关字段
+    assert "file_path" not in result
+    assert "file_url" not in result
+
+
+def test_visualization_service_generate_save_to_plots_file_url_format():
+    output = "/tmp/test_plots_2"
+    service = VisualizationService(output_dir=output, base_url="/plots")
+    result = service.generate(
+        chart_type="fitness_curve",
+        data={"fitness_history": [100.0, 150.0, 200.0, 250.0]},
+        fmt="file_url",
+    )
+    assert "file_url" in result
+    assert result["file_url"].startswith("/plots/")
+    assert "file_path" in result
+    assert os.path.exists(result["file_path"])
+    assert result["file_path"].startswith(os.path.abspath(output))
+    # format=file_url -> 不应有base64
+    assert "image_base64" not in result
+    # 清理
+    if os.path.exists(result["file_path"]):
+        os.remove(result["file_path"])
+
+
+def test_visualization_service_generate_both_format():
+    output = "/tmp/test_plots_3"
+    service = VisualizationService(output_dir=output)
+    result = service.generate(
+        chart_type="fitness_curve",
+        data={"fitness_history": [80.0, 160.0, 240.0]},
+        fmt="both",
+    )
+    assert "image_base64" in result
+    assert "file_url" in result
+    assert "file_path" in result
+    assert os.path.exists(result["file_path"])
+    # 清理
+    if os.path.exists(result["file_path"]):
+        os.remove(result["file_path"])
+
+
+def test_visualization_service_generate_dashboard_with_all_fields():
+    service = VisualizationService(output_dir="/tmp/test_plots_4")
+    result = service.generate(
+        chart_type="dashboard",
+        data={
+            "episode_rewards": list(range(120)) + [200.0] * 50,
+            "policy_losses": [0.5, 0.4, 0.35, 0.3, 0.28],
+            "value_losses": [1.2, 1.0, 0.9, 0.85, 0.8],
+            "temperatures": [1.0, 0.95, 0.9, 0.85, 0.8],
+        },
+        title="Custom Dashboard Title",
+    )
+    assert result["width"] == 2100
+    assert result["height"] == 1500
+    assert "image_base64" in result
+    assert result["stats"]["has_policy_losses"] is True
+    assert result["stats"]["has_value_losses"] is True
+    assert result["stats"]["has_temperatures"] is True
+    assert result["stats"]["count"] == 170
+
+
+def test_visualization_service_generate_progress_with_avg():
+    service = VisualizationService(output_dir="/tmp/test_plots_5")
+    result = service.generate(
+        chart_type="progress",
+        data={
+            "fitness_history": [50.0, 80.0, 120.0, 180.0, 220.0],
+            "avg_fitness_history": [45.0, 70.0, 100.0, 150.0, 190.0],
+        },
+    )
+    assert result["stats"]["max"] == 220.0
+    assert result["stats"]["count"] == 5
+    assert "image_base64" in result
+
+
+def test_visualization_service_generate_comparison_raw():
+    service = VisualizationService(output_dir="/tmp/test_plots_6")
+    diff = [205.0, 210.0, 220.0, 195.0, 215.0]
+    non_diff = [170.0, 180.0, 165.0, 190.0, 175.0]
+    result = service.generate(
+        chart_type="comparison",
+        data={"diff_rewards": diff, "non_diff_rewards": non_diff},
+    )
+    assert "stats" in result
+    assert result["stats"]["differentiable"]["mean"] == pytest.approx(209.0)
+    assert result["stats"]["non_differentiable"]["mean"] == pytest.approx(176.0)
+    assert result["stats"]["performance_gap"] == pytest.approx(33.0)
+    assert result["stats"]["differentiable"]["passed"] is True
+    assert result["stats"]["non_differentiable"]["passed"] is False
+
+
+def test_visualization_service_generate_empty_data_raises():
+    service = VisualizationService()
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="fitness_curve",
+            data={"fitness_history": []},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="dashboard",
+            data={"episode_rewards": []},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="progress",
+            data={"fitness_history": []},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="comparison",
+            data={"diff_rewards": [], "non_diff_rewards": []},
+        )
+
+
+def test_visualization_service_generate_unknown_chart_type_raises():
+    service = VisualizationService()
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="unknown_chart",  # type: ignore[arg-type]
+            data={},
+        )
+
+
+def test_visualization_service_generate_missing_keys_raises():
+    service = VisualizationService()
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="fitness_curve",
+            data={"wrong_key": [1.0, 2.0]},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="dashboard",
+            data={"wrong_key": [1.0, 2.0]},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="progress",
+            data={"wrong_key": [1.0, 2.0]},
+        )
+    with pytest.raises(ValueError):
+        service.generate(
+            chart_type="comparison",
+            data={"diff_rewards": [1.0]},
+        )
+
+
+# ==================== 新增: VisualizationService generate_comparison() 方法测试 ====================
+
+
+def test_visualization_service_generate_comparison_base64_only():
+    service = VisualizationService(output_dir="/tmp/test_plots_7")
+    diff = [200.0 + i for i in range(15)]
+    non_diff = [150.0 + i for i in range(15)]
+    result = service.generate_comparison(
+        diff_rewards=diff,
+        non_diff_rewards=non_diff,
+        fmt="base64",
+        save_to_plots=False,
+    )
+    assert "boxplot_base64" in result
+    assert "histogram_base64" in result
+    assert "combined_base64" in result
+    assert isinstance(result["boxplot_base64"], str)
+    assert len(result["boxplot_base64"]) > 0
+    assert isinstance(result["histogram_base64"], str)
+    assert len(result["histogram_base64"]) > 0
+    assert isinstance(result["combined_base64"], str)
+    assert len(result["combined_base64"]) > 0
+    # format=base64 且不保存 -> 不应有路径
+    assert "boxplot_path" not in result
+    assert "histogram_path" not in result
+    assert "combined_path" not in result
+    # 统计
+    assert result["differentiable_stats"]["mean"] == pytest.approx(sum(diff) / len(diff))
+    assert result["non_differentiable_stats"]["mean"] == pytest.approx(sum(non_diff) / len(non_diff))
+    assert result["performance_gap"] == pytest.approx((sum(diff) - sum(non_diff)) / len(diff))
+
+
+def test_visualization_service_generate_comparison_both_format_and_save():
+    output = "/tmp/test_plots_8"
+    service = VisualizationService(output_dir=output)
+    diff = list(range(10))
+    non_diff = list(range(10))
+    result = service.generate_comparison(
+        diff_rewards=diff,
+        non_diff_rewards=non_diff,
+        fmt="both",
+        save_to_plots=True,
+    )
+    # Base64 存在
+    assert "boxplot_base64" in result
+    assert "histogram_base64" in result
+    assert "combined_base64" in result
+    # 路径存在
+    for key in ("boxplot_path", "histogram_path", "combined_path"):
+        assert key in result
+        assert os.path.exists(result[key])
+        assert result[key].startswith(os.path.abspath(output))
+    # URL 存在
+    for key in ("boxplot_url", "histogram_url", "combined_url"):
+        assert key in result
+        assert result[key].startswith("/plots/")
+    # 清理
+    for key in ("boxplot_path", "histogram_path", "combined_path"):
+        if os.path.exists(result[key]):
+            os.remove(result[key])
+
+
+def test_visualization_service_generate_comparison_file_url_format():
+    output = "/tmp/test_plots_9"
+    service = VisualizationService(output_dir=output, base_url="/static/plots")
+    result = service.generate_comparison(
+        diff_rewards=[10.0, 20.0, 30.0],
+        non_diff_rewards=[5.0, 15.0, 25.0],
+        fmt="file_url",
+    )
+    # 自动保存 -> 路径存在
+    assert "boxplot_path" in result
+    assert os.path.exists(result["boxplot_path"])
+    # URL 使用自定义 base_url
+    assert result["boxplot_url"].startswith("/static/plots/")
+    # format=file_url -> 无 base64
+    assert "boxplot_base64" not in result
+    assert "histogram_base64" not in result
+    assert "combined_base64" not in result
+    # 清理
+    for key in ("boxplot_path", "histogram_path", "combined_path"):
+        if key in result and os.path.exists(result[key]):
+            os.remove(result[key])
+
+
+def test_visualization_service_generate_comparison_custom_title():
+    service = VisualizationService()
+    result = service.generate_comparison(
+        diff_rewards=[100.0, 200.0, 300.0],
+        non_diff_rewards=[80.0, 180.0, 280.0],
+        title="My Custom Comparison Title",
+    )
+    # 只要不报错并返回有效结果即通过
+    assert result["performance_gap"] == pytest.approx(20.0)
+    assert len(result["boxplot_base64"]) > 0
+
+
+def test_visualization_service_cleanup_old_files(tmp_path):
+    import time
+    output_dir = str(tmp_path / "plots_cleanup")
+    os.makedirs(output_dir, exist_ok=True)
+    # 创建一些"老"文件
+    old_file = os.path.join(output_dir, "old_plot.png")
+    with open(old_file, "w") as f:
+        f.write("fake")
+    # 修改 mtime 为 48 小时前
+    old_time = time.time() - 48 * 3600
+    os.utime(old_file, (old_time, old_time))
+    # 创建一个"新"文件
+    new_file = os.path.join(output_dir, "new_plot.png")
+    with open(new_file, "w") as f:
+        f.write("fake")
+    service = VisualizationService(output_dir=output_dir)
+    removed = service.cleanup_old_files(max_age_hours=24)
+    assert removed >= 1
+    assert not os.path.exists(old_file)
+    assert os.path.exists(new_file)

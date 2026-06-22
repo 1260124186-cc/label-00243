@@ -278,7 +278,7 @@ class TestVisualizationRequestValidation:
             VisualizationRequest(
                 task_id="test-task",
                 chart_type="fitness_curve",
-                window_size=200
+                window_size=600
             )
 
     def test_valid_window_size(self):
@@ -525,3 +525,228 @@ class TestResponseModels:
         assert comparison.weight_difference_norm == 0.5
         assert comparison.differentiable_result.passed is True
         assert comparison.non_differentiable_result.passed is False
+
+
+class TestVisualizationRequestNewFeatures:
+    """测试新增的 VisualizationRequest 功能"""
+
+    def test_with_raw_data_fitness_curve(self):
+        from src.schemas.requests import VisualizationRequest
+        req = VisualizationRequest(
+            chart_type="fitness_curve",
+            raw_data={"fitness_history": [1.0, 2.0, 3.0]},
+            format="both",
+            save_to_plots=True
+        )
+        assert req.task_id is None
+        assert req.raw_data is not None
+        assert req.format == "both"
+        assert req.save_to_plots is True
+
+    def test_with_raw_data_dashboard(self):
+        from src.schemas.requests import VisualizationRequest
+        req = VisualizationRequest(
+            chart_type="dashboard",
+            raw_data={
+                "episode_rewards": [100.0, 200.0, 150.0],
+                "policy_losses": [0.5, 0.4],
+                "value_losses": [1.2, 1.1],
+                "temperatures": [1.0, 0.99]
+            },
+            window_size=20
+        )
+        assert req.chart_type == "dashboard"
+        assert req.window_size == 20
+
+    def test_with_raw_data_comparison(self):
+        from src.schemas.requests import VisualizationRequest
+        req = VisualizationRequest(
+            chart_type="comparison",
+            raw_data={
+                "diff_rewards": [210.0, 220.0, 205.0],
+                "non_diff_rewards": [180.0, 175.0, 190.0]
+            },
+            format="base64"
+        )
+        assert "diff_rewards" in req.raw_data
+
+    def test_with_raw_data_progress(self):
+        from src.schemas.requests import VisualizationRequest
+        req = VisualizationRequest(
+            chart_type="progress",
+            raw_data={
+                "fitness_history": [50.0, 100.0, 180.0],
+                "avg_fitness_history": [40.0, 85.0, 150.0]
+            }
+        )
+        assert req.chart_type == "progress"
+
+    def test_neither_task_id_nor_raw_data_raises(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(chart_type="fitness_curve")
+
+    def test_both_task_id_and_raw_data_raises(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(
+                chart_type="fitness_curve",
+                task_id="abc",
+                raw_data={"fitness_history": [1.0]}
+            )
+
+    def test_missing_fitness_history_in_raw_data_fitness_curve(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(
+                chart_type="fitness_curve",
+                raw_data={"other_key": [1.0, 2.0]}
+            )
+
+    def test_missing_diff_rewards_in_comparison_raw_data(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(
+                chart_type="comparison",
+                raw_data={"non_diff_rewards": [1.0, 2.0]}
+            )
+
+    def test_missing_episode_rewards_in_dashboard_raw_data(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(
+                chart_type="dashboard",
+                raw_data={"policy_losses": [1.0, 2.0]}
+            )
+
+    def test_invalid_format_value_raises(self):
+        from src.schemas.requests import VisualizationRequest
+        with pytest.raises(Exception):
+            VisualizationRequest(
+                chart_type="fitness_curve",
+                task_id="abc",
+                format="invalid_format"
+            )
+
+    def test_valid_formats(self):
+        from src.schemas.requests import VisualizationRequest
+        for fmt in ["base64", "file_url", "both"]:
+            req = VisualizationRequest(
+                chart_type="fitness_curve",
+                task_id="abc",
+                format=fmt  # type: ignore[arg-type]
+            )
+            assert req.format == fmt
+
+    def test_custom_title_and_labels(self):
+        from src.schemas.requests import VisualizationRequest
+        req = VisualizationRequest(
+            chart_type="fitness_curve",
+            task_id="abc",
+            title="My Custom Title",
+            xlabel="Generation",
+            ylabel="Reward"
+        )
+        assert req.title == "My Custom Title"
+        assert req.xlabel == "Generation"
+        assert req.ylabel == "Reward"
+        assert req.show_avg is True
+
+
+class TestVisualizationComparisonQuery:
+    """测试 VisualizationComparisonQuery schema"""
+
+    def test_valid_with_rewards(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        q = VisualizationComparisonQuery(
+            diff_rewards=[210.0, 220.0, 200.0],
+            non_diff_rewards=[180.0, 170.0, 190.0]
+        )
+        assert q.diff_rewards == [210.0, 220.0, 200.0]
+        assert q.non_diff_rewards == [180.0, 170.0, 190.0]
+        assert q.format == "base64"
+
+    def test_valid_with_model_and_seeds(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        seeds = list(range(24))
+        q = VisualizationComparisonQuery(
+            differentiable_model_path="/tmp/model.pt",
+            genetic_seeds=seeds,
+            format="both",
+            save_to_plots=True
+        )
+        assert q.differentiable_model_path == "/tmp/model.pt"
+        assert len(q.genetic_seeds) == 24
+        assert q.format == "both"
+        assert q.save_to_plots is True
+
+    def test_valid_with_task_ids(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        q = VisualizationComparisonQuery(
+            differentiable_task_id="ppo-task-1",
+            genetic_task_id="ga-task-1",
+            num_episodes=20
+        )
+        assert q.differentiable_task_id == "ppo-task-1"
+        assert q.genetic_task_id == "ga-task-1"
+        assert q.num_episodes == 20
+
+    def test_no_data_source_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery()
+
+    def test_mixed_data_sources_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(
+                differentiable_task_id="ppo-1",
+                genetic_task_id="ga-1",
+                diff_rewards=[1.0],
+                non_diff_rewards=[2.0]
+            )
+
+    def test_invalid_genetic_seeds_wrong_length(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(
+                differentiable_model_path="/tmp/m.pt",
+                genetic_seeds=[1, 2, 3]
+            )
+
+    def test_partial_task_ids_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(differentiable_task_id="only-ppo")
+
+    def test_partial_rewards_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(diff_rewards=[1.0, 2.0])
+
+    def test_invalid_format_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(
+                diff_rewards=[1.0],
+                non_diff_rewards=[2.0],
+                format="invalid"  # type: ignore[arg-type]
+            )
+
+    def test_invalid_num_episodes_raises(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        with pytest.raises(Exception):
+            VisualizationComparisonQuery(
+                diff_rewards=[1.0],
+                non_diff_rewards=[2.0],
+                num_episodes=0
+            )
+
+    def test_with_custom_title(self):
+        from src.schemas.requests import VisualizationComparisonQuery
+        q = VisualizationComparisonQuery(
+            diff_rewards=[1.0, 2.0],
+            non_diff_rewards=[3.0, 4.0],
+            title="Custom Comparison Title"
+        )
+        assert q.title == "Custom Comparison Title"
