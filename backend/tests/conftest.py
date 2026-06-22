@@ -105,6 +105,7 @@ def genetic_algorithm():
         elite_size=2,
         seed_range=(0, 100),
         traversal_enabled=False,
+        alpha=0.9,
     )
 
 

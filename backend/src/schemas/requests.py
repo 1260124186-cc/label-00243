@@ -64,12 +64,22 @@ class GeneticStartRequest(BaseModel):
     target_fitness: float = Field(default=200.0, description="目标适应度")
     evaluation_episodes: int = Field(default=5, ge=1, le=100, description="每个个体的评估回合数")
     env_name: str = Field(default="LunarLander-v2", description="环境名称")
-    
+    alpha: float = Field(default=0.9, ge=0, le=1, description="双目标适应度权重：alpha * env_reward + (1-alpha) * weight_similarity")
+    target_weights_path: Optional[str] = Field(default=None, description="PPO训练好的权重文件路径，用于计算权重相似度")
+    target_seeds: Optional[List[int]] = Field(default=None, description="目标网络的24个种子，用于生成目标权重计算相似度")
+
     @field_validator('seed_range_max')
     @classmethod
     def validate_seed_range(cls, v, info):
         if 'seed_range_min' in info.data and v <= info.data['seed_range_min']:
             raise ValueError('seed_range_max must be greater than seed_range_min')
+        return v
+
+    @field_validator('target_seeds')
+    @classmethod
+    def validate_target_seeds(cls, v):
+        if v is not None and len(v) != 24:
+            raise ValueError('target_seeds must contain exactly 24 integers (4 rows x 6 columns)')
         return v
 
 

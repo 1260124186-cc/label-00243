@@ -39,6 +39,8 @@ class Individual:
     """
     seeds: np.ndarray  # shape: (4, 6)
     fitness: float = float('-inf')
+    env_reward: float = float('-inf')
+    weight_similarity: float = float('-inf')
     generation: int = 0
 
     def __post_init__(self):
@@ -75,15 +77,29 @@ class Individual:
 
     def copy(self) -> 'Individual':
         """深拷贝"""
-        return Individual(seeds=self.seeds.copy(), fitness=self.fitness, generation=self.generation)
+        return Individual(
+            seeds=self.seeds.copy(),
+            fitness=self.fitness,
+            env_reward=self.env_reward,
+            weight_similarity=self.weight_similarity,
+            generation=self.generation
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
             'seeds': self.seeds.tolist(),
             'fitness': self.fitness,
+            'env_reward': self.env_reward,
+            'weight_similarity': self.weight_similarity,
             'generation': self.generation
         }
+
+    def reset_fitness(self) -> None:
+        """重置适应度相关字段"""
+        self.fitness = float('-inf')
+        self.env_reward = float('-inf')
+        self.weight_similarity = float('-inf')
 
 
 class WeightGenerator:
@@ -376,6 +392,82 @@ class WeightGenerator:
 
         network.load_state_dict(state_dict)
 
+    def compute_weight_mse(
+        self,
+        generated_weights: Dict[str, torch.Tensor],
+        target_weights: Dict[str, torch.Tensor]
+    ) -> float:
+        """
+        计算生成权重与目标权重之间的均方误差 (MSE)
+
+        Args:
+            generated_weights: 生成的权重字典
+            target_weights: 目标权重字典
+
+        Returns:
+            MSE 值
+        """
+        total_mse = 0.0
+        total_params = 0
+
+        for name in generated_weights:
+            if name not in target_weights:
+                continue
+
+            gen_w = generated_weights[name]
+            tgt_w = target_weights[name]
+
+            if gen_w.shape != tgt_w.shape:
+                logger.warning(f"Shape mismatch for {name}: {gen_w.shape} vs {tgt_w.shape}")
+                continue
+
+            mse = torch.mean((gen_w - tgt_w) ** 2).item()
+            num_params = gen_w.numel()
+            total_mse += mse * num_params
+            total_params += num_params
+
+        if total_params == 0:
+            return 0.0
+
+        return total_mse / total_params
+
+    def compute_weight_similarity(
+        self,
+        generated_weights: Dict[str, torch.Tensor],
+        target_weights: Dict[str, torch.Tensor]
+    ) -> float:
+        """
+        计算权重相似度 = 1 - MSE(generated_weights, target_weights)
+
+        Args:
+            generated_weights: 生成的权重字典
+            target_weights: 目标权重字典
+
+        Returns:
+            权重相似度，范围 (-inf, 1]
+        """
+        mse = self.compute_weight_mse(generated_weights, target_weights)
+        return 1.0 - mse
+
+    def compute_combined_fitness(
+        self,
+        env_reward: float,
+        weight_similarity: float,
+        alpha: float = 0.9
+    ) -> float:
+        """
+        计算综合适应度 = alpha * env_reward + (1 - alpha) * weight_similarity
+
+        Args:
+            env_reward: 环境奖励适应度
+            weight_similarity: 权重相似度
+            alpha: 环境奖励的权重系数
+
+        Returns:
+            综合适应度
+        """
+        return alpha * env_reward + (1 - alpha) * weight_similarity
+
 
 class GeneticAlgorithm:
     """
@@ -405,7 +497,10 @@ class GeneticAlgorithm:
         elite_size: int = 5,
         seed_range: Tuple[int, int] = (0, 10000),
         elite_return_probability: float = 0.1,
-        traversal_enabled: bool = True
+        traversal_enabled: bool = True,
+        alpha: float = 0.9,
+        target_weights: Optional[Dict[str, torch.Tensor]] = None,
+        network_shapes: Optional[Dict[str, Tuple[int, ...]]] = None
     ):
         """
         Args:
@@ -416,6 +511,9 @@ class GeneticAlgorithm:
             seed_range: 种子范围
             elite_return_probability: 精英回归概率基数
             traversal_enabled: 是否启用遍历个体
+            alpha: 双目标适应度权重：alpha * env_reward + (1-alpha) * weight_similarity
+            target_weights: 目标权重字典，用于计算权重相似度（PPO 训练得到的权重）
+            network_shapes: 网络各层权重形状，用于生成个体权重
         """
         self.population_size = population_size
         self.mutation_rate = mutation_rate
@@ -424,6 +522,9 @@ class GeneticAlgorithm:
         self.seed_range = seed_range
         self.elite_return_probability = elite_return_probability
         self.traversal_enabled = traversal_enabled
+        self.alpha = alpha
+        self.target_weights = target_weights
+        self.network_shapes = network_shapes
 
         self.population: List[Individual] = []
         self.elite_archive: List[Individual] = []
@@ -431,6 +532,8 @@ class GeneticAlgorithm:
         self.best_individual: Optional[Individual] = None
         self.best_fitness = float('-inf')
         self.fitness_history: List[float] = []
+        self.env_reward_history: List[float] = []
+        self.weight_similarity_history: List[float] = []
 
         # 遍历计数器
         self.traversal_counter = 0
@@ -439,8 +542,74 @@ class GeneticAlgorithm:
 
         logger.info(
             f"GeneticAlgorithm initialized: pop_size={population_size}, "
-            f"mutation_rate={mutation_rate}, crossover_rate={crossover_rate}"
+            f"mutation_rate={mutation_rate}, crossover_rate={crossover_rate}, "
+            f"alpha={alpha}, target_weights={'enabled' if target_weights else 'disabled'}"
         )
+
+    def set_target_weights(
+        self,
+        target_weights: Dict[str, torch.Tensor],
+        network_shapes: Optional[Dict[str, Tuple[int, ...]]] = None
+    ) -> None:
+        """
+        设置目标权重用于权重相似度计算
+
+        Args:
+            target_weights: 目标权重字典
+            network_shapes: 网络各层权重形状
+        """
+        self.target_weights = target_weights
+        if network_shapes is not None:
+            self.network_shapes = network_shapes
+        logger.info(f"Target weights set, alpha={self.alpha}")
+
+    def _compute_weight_similarity(self, individual: Individual) -> float:
+        """
+        计算个体的权重相似度
+
+        Args:
+            individual: 遗传算法个体
+
+        Returns:
+            权重相似度，若无目标权重则返回 0.0
+        """
+        if self.target_weights is None or self.network_shapes is None:
+            return 0.0
+
+        generated_weights = self.weight_generator.generate_weights_from_individual(
+            individual, self.network_shapes
+        )
+        return self.weight_generator.compute_weight_similarity(
+            generated_weights, self.target_weights
+        )
+
+    def _evaluate_single(
+        self,
+        individual: Individual,
+        env_reward: float
+    ) -> float:
+        """
+        计算单个个体的完整适应度（双目标）
+
+        Args:
+            individual: 遗传算法个体
+            env_reward: 环境奖励
+
+        Returns:
+            综合适应度
+        """
+        weight_sim = self._compute_weight_similarity(individual)
+        individual.env_reward = env_reward
+        individual.weight_similarity = weight_sim
+
+        if self.target_weights is None:
+            individual.fitness = env_reward
+        else:
+            individual.fitness = self.weight_generator.compute_combined_fitness(
+                env_reward, weight_sim, self.alpha
+            )
+
+        return individual.fitness
 
     def initialize_population(self) -> None:
         """初始化种群"""
@@ -484,7 +653,7 @@ class GeneticAlgorithm:
             row = random.randint(0, 2)  # 0, 1, 2 可以与下一行交换
             seeds[[row, row + 1]] = seeds[[row + 1, row]]
 
-        new_individual.fitness = float('-inf')  # 重置适应度
+        new_individual.reset_fitness()  # 重置适应度
         return new_individual
 
     def crossover(self, parent1: Individual, parent2: Individual) -> Individual:
@@ -649,10 +818,10 @@ class GeneticAlgorithm:
             完成后回填 individual.fitness。
 
         Args:
-            evaluate_fn: 串行评估函数 (Individual) -> float
+            evaluate_fn: 串行评估函数 (Individual) -> float，返回环境奖励
             update_callback: 进度回调函数 (idx, total, fitness) -> None
             parallel_executor: 并行执行器（如 ProcessPoolExecutor）
-            parallel_worker_fn: 顶层 worker 函数，用于子进程执行
+            parallel_worker_fn: 顶层 worker 函数，用于子进程执行，返回环境奖励
             parallel_args_builder: 为 worker 构造参数的函数
         """
         pop_size = len(self.population)
@@ -683,28 +852,40 @@ class GeneticAlgorithm:
             total_pending = len(pending_individuals)
             for fut in as_completed(fut_to_idx):
                 orig_idx, _ = fut_to_idx[fut]
-                fitness = fut.result()
-                self.population[orig_idx].fitness = fitness
+                env_reward = fut.result()
+                self._evaluate_single(self.population[orig_idx], env_reward)
                 completed_count += 1
                 if update_callback:
-                    update_callback(orig_idx, pop_size, fitness)
+                    update_callback(orig_idx, pop_size, self.population[orig_idx].fitness)
         else:
             for i, individual in enumerate(self.population):
                 if individual.fitness == float("-inf"):
                     assert evaluate_fn is not None, "evaluate_fn required in serial mode"
-                    individual.fitness = evaluate_fn(individual)
+                    env_reward = evaluate_fn(individual)
+                    self._evaluate_single(individual, env_reward)
 
                 if update_callback:
                     update_callback(i, pop_size, individual.fitness)
 
         best_in_gen = max(self.population, key=lambda x: x.fitness)
         self.fitness_history.append(best_in_gen.fitness)
+        self.env_reward_history.append(best_in_gen.env_reward)
+        self.weight_similarity_history.append(best_in_gen.weight_similarity)
 
-        logger.info(
-            f"Generation {self.generation}: "
-            f"Best fitness = {best_in_gen.fitness:.2f}, "
-            f"Avg fitness = {np.mean([ind.fitness for ind in self.population]):.2f}"
-        )
+        if self.target_weights is not None:
+            logger.info(
+                f"Generation {self.generation}: "
+                f"Best fitness = {best_in_gen.fitness:.2f} "
+                f"(env_reward={best_in_gen.env_reward:.2f}, "
+                f"weight_sim={best_in_gen.weight_similarity:.4f}), "
+                f"Avg fitness = {np.mean([ind.fitness for ind in self.population]):.2f}"
+            )
+        else:
+            logger.info(
+                f"Generation {self.generation}: "
+                f"Best fitness = {best_in_gen.fitness:.2f}, "
+                f"Avg fitness = {np.mean([ind.fitness for ind in self.population]):.2f}"
+            )
 
     def run(
         self,
@@ -764,5 +945,9 @@ class GeneticAlgorithm:
             'best_individual': self.best_individual.to_dict() if self.best_individual else None,
             'elite_archive_size': len(self.elite_archive),
             'fitness_history': self.fitness_history,
+            'env_reward_history': self.env_reward_history,
+            'weight_similarity_history': self.weight_similarity_history,
+            'alpha': self.alpha,
+            'target_weights_enabled': self.target_weights is not None,
             'traversal_counter': self.traversal_counter
         }

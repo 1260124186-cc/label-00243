@@ -19,9 +19,54 @@ from ..schemas.responses import GeneticStatusData, IndividualData, GeneticPopula
 from ..core.exceptions import GeneticAlgorithmException
 
 
+def _load_target_weights(
+    target_weights_path: Optional[str],
+    target_seeds: Optional[List[int]],
+    state_dim: int,
+    action_dim: int
+) -> Optional[Dict[str, torch.Tensor]]:
+    """
+    加载目标权重，支持从文件路径或种子加载
+
+    Args:
+        target_weights_path: PPO 权重文件路径
+        target_seeds: 24个种子列表
+        state_dim: 状态维度
+        action_dim: 动作维度
+
+    Returns:
+        目标权重字典，或 None
+    """
+    if target_weights_path:
+        try:
+            checkpoint = torch.load(target_weights_path, map_location='cpu')
+            if 'policy_state_dict' in checkpoint:
+                return checkpoint['policy_state_dict']
+            return checkpoint
+        except Exception as e:
+            logger.warning(f"Failed to load target weights from {target_weights_path}: {e}")
+            return None
+
+    if target_seeds:
+        try:
+            from ..models.network import DifferentiableNetwork
+            net = DifferentiableNetwork.create_from_seeds(
+                seeds=target_seeds,
+                state_dim=state_dim,
+                action_dim=action_dim
+            )
+            return net.export_weight_dict()
+        except Exception as e:
+            logger.warning(f"Failed to generate target weights from seeds: {e}")
+            return None
+
+    return None
+
+
 def _genetic_worker_evaluate(args: Tuple[Any, ...]) -> float:
     """
     多进程 worker：独立评估单个个体（模块顶层函数，必须可pickle）。
+    返回环境奖励，权重相似度在主进程计算。
 
     args 元组:
       (env_name, state_dim, action_dim, evaluation_episodes, seeds_flat_list_24)
@@ -182,14 +227,36 @@ class GeneticService:
             state_dim = env.observation_space.shape[0]
             action_dim = env.action_space.n
 
+            target_weights = _load_target_weights(
+                target_weights_path=task.config.target_weights_path,
+                target_seeds=task.config.target_seeds,
+                state_dim=state_dim,
+                action_dim=action_dim
+            )
+
+            temp_network = NonDifferentiableNetwork(state_dim=state_dim, action_dim=action_dim)
+            network_shapes = {
+                name: tuple(param.shape)
+                for name, param in temp_network.named_parameters()
+            }
+
             ga = GeneticAlgorithm(
                 population_size=task.config.population_size,
                 mutation_rate=task.config.mutation_rate,
                 crossover_rate=task.config.crossover_rate,
                 elite_size=task.config.elite_size,
                 seed_range=(task.config.seed_range_min, task.config.seed_range_max),
+                alpha=task.config.alpha,
+                target_weights=target_weights,
+                network_shapes=network_shapes,
             )
             task.ga = ga
+
+            if target_weights is not None:
+                logger.info(
+                    f"Task {task.task_id} using dual-objective fitness: "
+                    f"alpha={task.config.alpha}, target_weights loaded"
+                )
 
             use_parallel = self.use_parallel_eval and self.max_parallel_workers > 1
             env_name_local = task.config.env_name

@@ -467,3 +467,237 @@ class TestIndividualExtended:
         import json
         json_str = json.dumps(d)
         assert json_str is not None
+
+    def test_individual_env_reward_and_weight_similarity_defaults(self):
+        ind = Individual.create_random()
+        assert ind.env_reward == float('-inf')
+        assert ind.weight_similarity == float('-inf')
+
+    def test_individual_reset_fitness(self):
+        ind = Individual.create_random()
+        ind.fitness = 100.0
+        ind.env_reward = 90.0
+        ind.weight_similarity = 0.95
+        ind.reset_fitness()
+        assert ind.fitness == float('-inf')
+        assert ind.env_reward == float('-inf')
+        assert ind.weight_similarity == float('-inf')
+
+    def test_individual_copy_preserves_all_fields(self):
+        seeds = np.random.randint(0, 100, size=(4, 6))
+        ind = Individual(seeds=seeds, fitness=150.0, env_reward=140.0,
+                        weight_similarity=0.85, generation=10)
+        copied = ind.copy()
+        assert copied.fitness == 150.0
+        assert copied.env_reward == 140.0
+        assert copied.weight_similarity == 0.85
+        assert copied.generation == 10
+        np.testing.assert_array_equal(copied.seeds, seeds)
+
+    def test_individual_to_dict_includes_all_fields(self):
+        seeds = np.random.randint(0, 100, size=(4, 6))
+        ind = Individual(seeds=seeds, fitness=150.0, env_reward=140.0,
+                        weight_similarity=0.85, generation=10)
+        d = ind.to_dict()
+        assert 'env_reward' in d
+        assert 'weight_similarity' in d
+        assert d['env_reward'] == 140.0
+        assert d['weight_similarity'] == 0.85
+
+
+class TestWeightGeneratorDualObjective:
+    def test_compute_weight_mse_identical_weights(self, weight_generator):
+        weights1 = {
+            "w1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+            "w2": torch.tensor([0.5, -0.5]),
+        }
+        mse = weight_generator.compute_weight_mse(weights1, weights1)
+        assert mse == pytest.approx(0.0)
+
+    def test_compute_weight_mse_different_weights(self, weight_generator):
+        weights1 = {"w1": torch.tensor([[1.0, 2.0], [3.0, 4.0]])}
+        weights2 = {"w1": torch.tensor([[2.0, 3.0], [4.0, 5.0]])}
+        mse = weight_generator.compute_weight_mse(weights1, weights2)
+        assert mse == pytest.approx(1.0)
+
+    def test_compute_weight_similarity_identical_weights(self, weight_generator):
+        weights1 = {
+            "w1": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        }
+        similarity = weight_generator.compute_weight_similarity(weights1, weights1)
+        assert similarity == pytest.approx(1.0)
+
+    def test_compute_weight_similarity_different_weights(self, weight_generator):
+        weights1 = {"w1": torch.tensor([[0.0, 0.0]])}
+        weights2 = {"w1": torch.tensor([[1.0, 1.0]])}
+        similarity = weight_generator.compute_weight_similarity(weights1, weights2)
+        assert similarity == pytest.approx(0.0)
+
+    def test_compute_combined_fitness_alpha_1(self, weight_generator):
+        fitness = weight_generator.compute_combined_fitness(100.0, 0.8, alpha=1.0)
+        assert fitness == pytest.approx(100.0)
+
+    def test_compute_combined_fitness_alpha_0(self, weight_generator):
+        fitness = weight_generator.compute_combined_fitness(100.0, 0.8, alpha=0.0)
+        assert fitness == pytest.approx(0.8)
+
+    def test_compute_combined_fitness_alpha_09(self, weight_generator):
+        fitness = weight_generator.compute_combined_fitness(100.0, 0.8, alpha=0.9)
+        expected = 0.9 * 100.0 + 0.1 * 0.8
+        assert fitness == pytest.approx(expected)
+
+
+class TestGeneticAlgorithmDualObjective:
+    def test_ga_init_with_alpha_and_target_weights(self, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        ga = GeneticAlgorithm(
+            population_size=10,
+            mutation_rate=0.1,
+            crossover_rate=0.7,
+            elite_size=2,
+            seed_range=(0, 100),
+            traversal_enabled=False,
+            alpha=0.8,
+            target_weights=target_weights,
+            network_shapes=network_shapes,
+        )
+        assert ga.alpha == 0.8
+        assert ga.target_weights is not None
+        assert ga.network_shapes == network_shapes
+
+    def test_ga_set_target_weights(self, genetic_algorithm, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        genetic_algorithm.set_target_weights(target_weights, network_shapes)
+        assert genetic_algorithm.target_weights is not None
+        assert genetic_algorithm.network_shapes == network_shapes
+
+    def test_ga_compute_weight_similarity_with_target(self, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        ga = GeneticAlgorithm(
+            population_size=10,
+            alpha=0.9,
+            target_weights=target_weights,
+            network_shapes=network_shapes,
+            traversal_enabled=False,
+        )
+        ind = Individual.create_random()
+        similarity = ga._compute_weight_similarity(ind)
+        assert isinstance(similarity, float)
+        assert similarity <= 1.0
+
+    def test_ga_compute_weight_similarity_without_target(self, genetic_algorithm):
+        ind = Individual.create_random()
+        similarity = genetic_algorithm._compute_weight_similarity(ind)
+        assert similarity == 0.0
+
+    def test_ga_evaluate_single_with_target(self, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        ga = GeneticAlgorithm(
+            population_size=10,
+            alpha=0.9,
+            target_weights=target_weights,
+            network_shapes=network_shapes,
+            traversal_enabled=False,
+        )
+        ind = Individual.create_random()
+        env_reward = 150.0
+        fitness = ga._evaluate_single(ind, env_reward)
+        assert ind.env_reward == env_reward
+        assert ind.weight_similarity <= 1.0
+        expected_fitness = 0.9 * env_reward + 0.1 * ind.weight_similarity
+        assert fitness == pytest.approx(expected_fitness)
+        assert ind.fitness == pytest.approx(expected_fitness)
+
+    def test_ga_evaluate_single_without_target(self, genetic_algorithm):
+        ind = Individual.create_random()
+        env_reward = 150.0
+        fitness = genetic_algorithm._evaluate_single(ind, env_reward)
+        assert ind.env_reward == env_reward
+        assert ind.weight_similarity == 0.0
+        assert fitness == pytest.approx(env_reward)
+        assert ind.fitness == pytest.approx(env_reward)
+
+    def test_ga_evaluate_population_dual_objective(self, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        ga = GeneticAlgorithm(
+            population_size=5,
+            alpha=0.9,
+            target_weights=target_weights,
+            network_shapes=network_shapes,
+            traversal_enabled=False,
+        )
+        ga.initialize_population()
+
+        def mock_evaluate(ind):
+            return float(np.random.randint(50, 200))
+
+        ga.evaluate_population(mock_evaluate)
+
+        assert len(ga.env_reward_history) == 1
+        assert len(ga.weight_similarity_history) == 1
+        for ind in ga.population:
+            assert ind.env_reward != float('-inf')
+            assert ind.weight_similarity != float('-inf')
+            assert ind.fitness == 0.9 * ind.env_reward + 0.1 * ind.weight_similarity
+
+    def test_ga_evaluate_population_single_objective(self, genetic_algorithm):
+        genetic_algorithm.initialize_population()
+
+        def mock_evaluate(ind):
+            return float(np.random.randint(50, 200))
+
+        genetic_algorithm.evaluate_population(mock_evaluate)
+
+        assert len(genetic_algorithm.env_reward_history) == 1
+        assert len(genetic_algorithm.weight_similarity_history) == 1
+        for ind in genetic_algorithm.population:
+            assert ind.env_reward != float('-inf')
+            assert ind.weight_similarity == 0.0
+            assert ind.fitness == ind.env_reward
+
+    def test_ga_run_with_dual_objective(self, diff_network, network_shapes):
+        target_weights = diff_network.export_weight_dict()
+        ga = GeneticAlgorithm(
+            population_size=5,
+            alpha=0.9,
+            target_weights=target_weights,
+            network_shapes=network_shapes,
+            traversal_enabled=False,
+        )
+
+        def mock_evaluate(ind):
+            return 100.0
+
+        best = ga.run(
+            evaluate_fn=mock_evaluate,
+            max_generations=3,
+            target_fitness=999.0,
+        )
+
+        assert best is not None
+        assert len(ga.fitness_history) == 3
+        assert len(ga.env_reward_history) == 3
+        assert len(ga.weight_similarity_history) == 3
+        assert best.env_reward == 100.0
+        assert best.fitness == pytest.approx(0.9 * 100.0 + 0.1 * best.weight_similarity)
+
+    def test_ga_get_status_includes_dual_objective_info(self, genetic_algorithm):
+        genetic_algorithm.initialize_population()
+        genetic_algorithm.evaluate_population(lambda ind: 100.0)
+        status = genetic_algorithm.get_status()
+        assert 'env_reward_history' in status
+        assert 'weight_similarity_history' in status
+        assert 'alpha' in status
+        assert 'target_weights_enabled' in status
+        assert status['alpha'] == 0.9
+        assert status['target_weights_enabled'] == False
+
+    def test_ga_mutate_resets_all_fitness_fields(self, genetic_algorithm):
+        ind = Individual.create_random()
+        ind.fitness = 100.0
+        ind.env_reward = 90.0
+        ind.weight_similarity = 0.9
+        mutated = genetic_algorithm.mutate(ind)
+        assert mutated.fitness == float('-inf')
+        assert mutated.env_reward == float('-inf')
+        assert mutated.weight_similarity == float('-inf')

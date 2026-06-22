@@ -260,7 +260,17 @@ class PipelineService:
             action_dim = env.action_space.n
 
             target_weight_dict = task.target_weight_dict
-            weight_similarity_coef = task.config.weight_similarity_coef
+
+            network_shapes = {
+                name: tuple(param.shape)
+                for name, param in NonDifferentiableNetwork(
+                    state_dim=state_dim, action_dim=action_dim
+                ).named_parameters()
+            }
+
+            alpha = 1.0 - task.config.weight_similarity_coef
+            if task.config.weight_similarity_coef > 0:
+                alpha = max(0.0, min(1.0, alpha))
 
             ga = GeneticAlgorithm(
                 population_size=ga_config.population_size,
@@ -268,6 +278,9 @@ class PipelineService:
                 crossover_rate=ga_config.crossover_rate,
                 elite_size=ga_config.elite_size,
                 seed_range=(ga_config.seed_range_min, ga_config.seed_range_max),
+                alpha=alpha,
+                target_weights=target_weight_dict,
+                network_shapes=network_shapes,
             )
 
             if task.config.target_seeds is not None:
@@ -281,10 +294,6 @@ class PipelineService:
             network = NonDifferentiableNetwork(
                 state_dim=state_dim, action_dim=action_dim
             )
-            network_shapes = {
-                name: tuple(param.shape)
-                for name, param in network.named_parameters()
-            }
             state_tensor_buf = torch.empty(state_dim, dtype=torch.float32)
             eval_episodes = ga_config.evaluation_episodes
 
@@ -314,28 +323,7 @@ class PipelineService:
                             break
                     total_reward += episode_reward
 
-                env_reward = total_reward / eval_episodes
-
-                if (
-                    target_weight_dict is not None
-                    and weight_similarity_coef > 0
-                ):
-                    ga_weight_dict = {
-                        name: param for name, param in weights.items()
-                    }
-                    distance = _compute_weight_distance(
-                        target_weight_dict, ga_weight_dict
-                    )
-                    target_norm = float(
-                        torch.norm(task.target_weight_vector).item()
-                    )
-                    max_possible_distance = max(target_norm, 1e-8)
-                    similarity = max(0.0, 1.0 - distance / max_possible_distance)
-                    fitness = env_reward + weight_similarity_coef * similarity * 200.0
-                else:
-                    fitness = env_reward
-
-                return fitness
+                return total_reward / eval_episodes
 
             def generation_callback(
                 gen: int, best_ind: Optional[Individual], best_fit: float
@@ -344,10 +332,18 @@ class PipelineService:
                     raise InterruptedError("Pipeline stopped by user")
                 task.ga_best_fitness = best_fit
                 task.ga_best_individual = best_ind
-                logger.info(
-                    f"Pipeline {task.task_id} GA gen {gen}: "
-                    f"best_fitness={best_fit:.2f}"
-                )
+                if best_ind is not None and target_weight_dict is not None:
+                    logger.info(
+                        f"Pipeline {task.task_id} GA gen {gen}: "
+                        f"best_fitness={best_fit:.2f} "
+                        f"(env_reward={best_ind.env_reward:.2f}, "
+                        f"weight_sim={best_ind.weight_similarity:.4f})"
+                    )
+                else:
+                    logger.info(
+                        f"Pipeline {task.task_id} GA gen {gen}: "
+                        f"best_fitness={best_fit:.2f}"
+                    )
 
             best = ga.run(
                 evaluate_fn=evaluate_individual,
@@ -362,18 +358,32 @@ class PipelineService:
 
             env.close()
 
+            stage_details = {
+                "best_fitness": task.ga_best_fitness,
+                "best_seeds": best.to_list() if best else None,
+                "total_generations": ga.generation,
+                "alpha": alpha,
+            }
+            if best is not None and target_weight_dict is not None:
+                stage_details["best_env_reward"] = best.env_reward
+                stage_details["best_weight_similarity"] = best.weight_similarity
+
             task.complete_stage(
                 PipelineStage.GA_SEARCH,
-                details={
-                    "best_fitness": task.ga_best_fitness,
-                    "best_seeds": best.to_list() if best else None,
-                    "total_generations": ga.generation,
-                },
+                details=stage_details,
             )
-            logger.info(
-                f"Pipeline {task.task_id} GA search done, "
-                f"best_fitness={task.ga_best_fitness:.2f}"
-            )
+            if best is not None and target_weight_dict is not None:
+                logger.info(
+                    f"Pipeline {task.task_id} GA search done, "
+                    f"best_fitness={task.ga_best_fitness:.2f} "
+                    f"(env_reward={best.env_reward:.2f}, "
+                    f"weight_sim={best.weight_similarity:.4f})"
+                )
+            else:
+                logger.info(
+                    f"Pipeline {task.task_id} GA search done, "
+                    f"best_fitness={task.ga_best_fitness:.2f}"
+                )
 
         except InterruptedError:
             raise

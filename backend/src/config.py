@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     GA_MAX_GENERATIONS: int = 100
     GA_SEED_RANGE_MIN: int = 0
     GA_SEED_RANGE_MAX: int = 10000
+    GA_ALPHA: float = 0.9
     
     # 环境配置
     DEFAULT_ENV: str = "LunarLander-v2"  # 注意：gymnasium 0.29.1 只支持 v2，不支持 v3
